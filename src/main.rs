@@ -1,51 +1,19 @@
-use std::io::{BufRead, BufReader};
-use std::net::{TcpListener, TcpStream};
+use crate::tcp_handler::ListenError;
+use crate::config::{Config};
 
-fn main() -> std::io::Result<()> {
-    let tcp_listener = match TcpListener::bind("127.0.0.1:8080") {
-        Ok(listener) => {
-            println!("Connection established on port {}", listener.local_addr()?.port());
-            listener
+mod tcp_handler;
+mod config;
+
+fn main() {
+    dotenvy::dotenv().ok();
+    
+    let config: Config = Config::new().unwrap_or_else(|e| panic!("{}", e));
+
+    match tcp_handler::listen_on(&format!("{}:{}", config.listener_address, config.listener_port)) {
+        Err(e) => match e {
+            ListenError::AddrParse(e) => panic!("Failed to parse listening addr: {:?}", e),
+            ListenError::Io(e) => panic!("Couldn't listen on: {:?}", e)
         },
-        Err(error) => panic!("Connection refused: {:?}", error)
+        _ => (),
     };
-
-    tcp_listener
-        .incoming()
-        .for_each( | peer: Result<TcpStream, std::io::Error> | {
-            match peer {
-                Ok(stream) => handle_connection(&stream),
-                Err(stream) => eprintln!("Failed to establish a connection: {:?}", stream),
-            }
-        });
-
-
-    Ok(())
-}
-
-fn handle_connection(stream: &TcpStream) -> () {
-    println!("Attempting to connect to peer...");
-
-    let peer_addr = match stream.peer_addr() {
-        Ok(addr) => addr,
-        Err(e) => {
-            eprintln!("Failed to get peer address: {}", e);
-            return;
-        }
-    };
-
-    println!("Connection established to: {}", peer_addr);
-
-
-    for line in BufReader::new(stream).lines() {
-        match line {
-            Ok(line) => println!("{}", line),
-            Err(e) => {
-                eprintln!("Client {} disconnected with error: {:?}", peer_addr, e);
-                return;
-            },
-        }
-    }
-
-    println!("Client {} disconnected without error", peer_addr);
 }
