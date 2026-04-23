@@ -1,8 +1,9 @@
+use crate::config::Config;
 use crate::tcp_handler::ListenError;
-use crate::config::{Config};
 
 mod tcp_handler;
 mod config;
+mod wire_format;
 
 fn main() {
     dotenvy::dotenv().ok();

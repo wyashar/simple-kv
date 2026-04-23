@@ -15,7 +15,7 @@ pub enum ConfigError {
 }
 
 impl Config {
-    pub fn new () -> Result<Config, ConfigError> {
+    pub fn new () -> Result<Self, ConfigError> {
         let listener_address = std::env::var(LISTENER_ADDRESS_ENV)
             .map_err( |_| ConfigError::MissingVar(LISTENER_ADDRESS_ENV))?;
 
