@@ -1,16 +1,10 @@
 use std::str::FromStr;
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct WireFormat {
     pub operation: WireFormatOperation,
     pub key: String,
-    pub data: String
-}
-
-impl WireFormat {
-    fn new(operation: WireFormatOperation, key: String, data: String) -> Self {
-        WireFormat { operation, key, data }
-    }
+    pub data: Option<String>
 }
 
 impl FromStr for WireFormat {
@@ -21,13 +15,22 @@ impl FromStr for WireFormat {
         let operation = WireFormatOperation::from_str(parts.get(0).ok_or(WireFormatParseError::MissingOperation)?)
             .map_err(WireFormatParseError::InvalidOperation)?;
         let key = parts.get(1).ok_or(WireFormatParseError::MissingKey)?.to_string();
-        let data = parts.get(2).ok_or(WireFormatParseError::MissingData)?.to_string();
 
-        if parts.len() > 3 {
-            return Err(WireFormatParseError::TooManyParts);
-        }
-
-        Ok(WireFormat::new(operation, key, data))
+        Ok(match operation {
+            WireFormatOperation::Put => {
+                let data = parts.get(2).ok_or(WireFormatParseError::MissingData)?.to_string();
+                if parts.len() > 3 {
+                    return Err(WireFormatParseError::TooManyParts);
+                }
+                WireFormat { operation, key, data: Some(data) }
+            },
+            WireFormatOperation::Del | WireFormatOperation::Get => {
+                if parts.len() > 2 {
+                    return Err(WireFormatParseError::TooManyParts);
+                }
+                WireFormat { operation, key, data: None }
+            }
+        })
     }
 }
 
@@ -40,7 +43,7 @@ pub enum WireFormatParseError {
     MissingData
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum WireFormatOperation {
     Put,
     Get,
@@ -52,11 +55,10 @@ pub enum OperationParseError {
     UnknownOperation(String)
 }
 
-
 impl FromStr for WireFormatOperation {
     type Err = OperationParseError;
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match input.to_uppercase().as_str() {
             "PUT" => Ok(WireFormatOperation::Put),
             "GET" => Ok(WireFormatOperation::Get),
             "DEL" => Ok(WireFormatOperation::Del),

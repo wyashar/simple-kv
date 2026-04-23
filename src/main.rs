@@ -4,6 +4,7 @@ use crate::tcp_handler::ListenError;
 mod tcp_handler;
 mod config;
 mod wire_format;
+pub mod kv_store;
 
 fn main() {
     dotenvy::dotenv().ok();

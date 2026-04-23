@@ -1,5 +1,6 @@
 use std::io::{BufRead, BufReader};
 use std::net::{TcpListener, SocketAddr, TcpStream};
+use crate::wire_format::WireFormat;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ListenError {
@@ -14,7 +15,6 @@ pub fn listen_on(addr: &str) -> Result<(), ListenError> {
     let listener = TcpListener::bind(parsed_addr)?;
     let local_addr = listener.local_addr()?;
     println!("Listening on {}:{}", local_addr.ip(), local_addr.port());
-
     listener
         .incoming()
         .for_each( | peer| {
@@ -43,7 +43,14 @@ fn handle_connection(stream: &TcpStream) -> () {
 
     for line in BufReader::new(stream).lines() {
         match line {
-            Ok(l) => println!("{}", l),
+            Ok(l) => {
+                match l.parse::<WireFormat>() {
+                    Ok(wire_format) => {
+                        println!("Received a wire format: {:?}", wire_format);
+                    },
+                    Err(err) => eprintln!("Peer {} sent an incorrect wire format: {:?}", peer_addr, err)
+                }
+            },
             Err(err) => {
                 eprintln!("Peer {} disconnected with error: {}", peer_addr, err);
                 return;
