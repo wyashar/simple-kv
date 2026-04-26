@@ -3,12 +3,11 @@ use std::str::FromStr;
 
 #[test]
 fn test_wire_format_put_valid() {
-    let input = "PUT key1 value1";
+    let input = "PUT key1 dmFsdWUx"; // "value1" in base64
     let result = WireFormat::from_str(input).unwrap();
     
-    assert_eq!(result.operation, WireFormatOperation::Put);
     assert_eq!(result.key, "key1");
-    assert_eq!(result.data, Some("value1".to_string()));
+    assert_eq!(result.operation, WireFormatOperation::Put(b"value1".to_vec()));
 }
 
 #[test]
@@ -18,7 +17,6 @@ fn test_wire_format_get_valid() {
     
     assert_eq!(result.operation, WireFormatOperation::Get);
     assert_eq!(result.key, "mykey");
-    assert_eq!(result.data, None);
 }
 
 #[test]
@@ -28,7 +26,6 @@ fn test_wire_format_del_valid() {
     
     assert_eq!(result.operation, WireFormatOperation::Del);
     assert_eq!(result.key, "somekey");
-    assert_eq!(result.data, None);
 }
 
 #[test]
@@ -82,10 +79,10 @@ fn test_wire_format_invalid_operation() {
 
 #[test]
 fn test_wire_format_operation_case_insensitive() {
-    let put_lower = WireFormatOperation::from_str("put").unwrap();
-    let put_upper = WireFormatOperation::from_str("PUT").unwrap();
-    let put_mixed = WireFormatOperation::from_str("Put").unwrap();
+    let put_lower = WireFormat::from_str("put key dmFsdWUx").unwrap(); // "value1" base64
+    let put_upper = WireFormat::from_str("PUT key dmFsdWUx").unwrap();
+    let put_mixed = WireFormat::from_str("Put key dmFsdWUx").unwrap();
     
-    assert_eq!(put_lower, put_upper);
-    assert_eq!(put_upper, put_mixed);
+    assert_eq!(put_lower.operation, put_upper.operation);
+    assert_eq!(put_upper.operation, put_mixed.operation);
 }

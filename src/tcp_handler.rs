@@ -1,6 +1,7 @@
 use std::io::{BufRead, BufReader};
 use std::net::{TcpListener, SocketAddr, TcpStream};
-use crate::wire_format::WireFormat;
+use crate::wire_format::{WireFormatOperation, WireFormat};
+use crate::kv_store::KvStore;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ListenError {

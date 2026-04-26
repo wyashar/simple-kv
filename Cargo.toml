@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 thiserror = "2.0.18"
 dotenvy = "0.15"
+base64 = "0.22"
 
 [dev-dependencies]
 mockall = "0.12"
