@@ -1,5 +1,11 @@
 use simple_kv::{Config, config::ConfigError};
 
+
+#[test]
+fn sandbox() {
+
+}
+
 #[test]
 fn test_config_new_success() {
     unsafe {
