@@ -1,3 +1,5 @@
+use std::fmt;
+
 #[derive(Debug)]
 enum Operation {
     Put(Vec<u8>, Vec<u8>),
@@ -32,7 +34,7 @@ impl TryFrom<&[u8]> for WireFormat {
     fn try_from(input: &[u8]) -> Result<Self, Self::Error> {
         let mut pos = 0;
 
-        let first_line = read_line(input, &mut pos)
+        let first_line = WireFormat::read_line(input, &mut pos)
             .ok_or(WireFormatParseError::InvalidCommandEncoding)?;
         let first_line_str = std::str::from_utf8(first_line)
             .map_err(|_| WireFormatParseError::InvalidCommandEncoding)?;
@@ -45,7 +47,7 @@ impl TryFrom<&[u8]> for WireFormat {
                  Ok(WireFormat::Cmd(result))
              },
              "sstr" => {
-                 let simple_str_bytes = read_line(input, &mut pos)
+                 let simple_str_bytes = WireFormat::read_line(input, &mut pos)
                      .ok_or(WireFormatParseError::InvalidSimpleStringEncoding)?;
                  let simple_str = std::str::from_utf8(simple_str_bytes)
                      .map_err(|_| WireFormatParseError::InvalidSimpleStringEncoding)?
@@ -55,6 +57,83 @@ impl TryFrom<&[u8]> for WireFormat {
              },
              _ => Err(WireFormatParseError::InvalidCommandEncoding)
          }
+    }
+}
+
+impl WireFormat {
+    fn read_line<'a>(input: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
+        let remaining = input.get(*pos..)?;
+        let crlf = remaining.windows(2).position(|w| w == b"\r\n")?;
+        let line = &remaining[..crlf];
+        *pos += crlf + 2;
+
+        Some(line)
+    }
+}
+
+impl fmt::Display for Operation {
+    // Keys and/or Values of Operation variants here are guaranteed to be valid UTF8 here
+    // This is b/c TryFrom<&[u8]> for Operation enforces it, and it's the only way to construct this Operation type
+    // hence we can use String::from_utf8_lossy here
+    // note that it's the same performance as std::str::from_utf8(s).unwrap()
+    // because String::from_utf8_lossy(str) returns Cow<str>
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Operation::Put(key, value) =>
+                write!(
+                    f,
+                    "Put\r\n{}\r\n{}\r\n{}\r\n{}\r\n",
+                    key.len(),
+                    String::from_utf8_lossy(key),
+                    value.len(),
+                    String::from_utf8_lossy(value)
+                ),
+            Operation::Get(key) =>
+                write!(
+                    f,
+                   "Get\r\n{}\r\n{}\r\n",
+                   key.len(),
+                   String::from_utf8_lossy(key)
+                ),
+            Operation::Del(key) =>
+                write!(
+                    f,
+                    "Del\r\n{}\r\n{}\r\n",
+                    key.len(),
+                    String::from_utf8_lossy(key)
+                ),
+        }
+    }
+}
+
+impl fmt::Display for WireFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WireFormat::Cmd(op) =>
+                write!(
+                    f,
+                    "op\r\n{}",
+                    op
+                ),
+            WireFormat::SimpleString(s) =>
+                write!(
+                    f,
+                    "sstr\r\n{}\r\n",
+                    s
+                )
+        }
+    }
+}
+
+impl From<Operation> for Vec<u8> {
+    fn from(op: Operation) -> Self {
+        op.to_string().into_bytes()
+    }
+}
+
+impl From<WireFormat> for Vec<u8> {
+    fn from(wf: WireFormat) -> Self {
+        wf.to_string().into_bytes()
     }
 }
 
@@ -75,33 +154,24 @@ enum OperationParseError {
     UnknownOperation,
 }
 
-fn read_line<'a>(input: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
-    let remaining = input.get(*pos..)?;
-    let crlf = remaining.windows(2).position(|w| w == b"\r\n")?;
-    let line = &remaining[..crlf];
-    *pos += crlf + 2;
-
-    Some(line)
-}
-
 impl TryFrom<&[u8]> for Operation {
     type Error = OperationParseError;
     fn try_from(input: &[u8]) -> Result<Self, Self::Error> {
         let mut pos = 0;
 
-        let op_line = read_line(input, &mut pos)
+        let op_line = WireFormat::read_line(input, &mut pos)
             .ok_or(OperationParseError::InvalidOperationEncoding)?;
         let operation_str = std::str::from_utf8(op_line)
             .map_err(|_| OperationParseError::InvalidOperationEncoding)?;
 
-        let key_len_line = read_line(input, &mut pos)
+        let key_len_line = WireFormat::read_line(input, &mut pos)
             .ok_or(OperationParseError::InvalidKeyLenEncoding)?;
         let key_len: usize = std::str::from_utf8(key_len_line)
             .map_err(|_| OperationParseError::InvalidKeyLenEncoding)?
             .parse()
             .map_err(|_| OperationParseError::InvalidKeyLenEncoding)?;
 
-        let key_line = read_line(input, &mut pos)
+        let key_line = WireFormat::read_line(input, &mut pos)
             .ok_or(OperationParseError::InvalidKeyEncoding)?;
         if key_line.len() != key_len {
             return Err(OperationParseError::InvalidKeyEncoding);
@@ -110,14 +180,14 @@ impl TryFrom<&[u8]> for Operation {
 
         match operation_str {
             "Put" => {
-                let value_len_line = read_line(input, &mut pos)
+                let value_len_line = WireFormat::read_line(input, &mut pos)
                     .ok_or(OperationParseError::InvalidValueLenEncoding)?;
                 let value_len: usize = std::str::from_utf8(value_len_line)
                     .map_err(|_| OperationParseError::InvalidValueLenEncoding)?
                     .parse()
                     .map_err(|_| OperationParseError::InvalidValueLenEncoding)?;
 
-                let value_line = read_line(input, &mut pos)
+                let value_line = WireFormat::read_line(input, &mut pos)
                     .ok_or(OperationParseError::InvalidValueEncoding)?;
                 if value_line.len() != value_len {
                     return Err(OperationParseError::InvalidValueEncoding);
@@ -151,6 +221,9 @@ impl TryFrom<&[u8]> for Operation {
 mod tests {
     use super::*;
 
+    // TODO: replace some of these helper functions by
+    // making WireFormat/Operation values, then converting them to bytes with our new
+    // string encoding
     fn make_put(key: &[u8], value: &[u8]) -> Vec<u8> {
         format!(
             "Put\r\n{}\r\n{}\r\n{}\r\n{}\r\n",
@@ -545,21 +618,21 @@ mod tests {
     #[test]
     fn test_read_line_empty_input() {
         let mut pos = 0;
-        let result = read_line(b"", &mut pos);
+        let result = WireFormat::read_line(b"", &mut pos);
         assert!(result.is_none());
     }
 
     #[test]
     fn test_read_line_no_crlf() {
         let mut pos = 0;
-        let result = read_line(b"hello", &mut pos);
+        let result = WireFormat::read_line(b"hello", &mut pos);
         assert!(result.is_none());
     }
 
     #[test]
     fn test_read_line_basic() {
         let mut pos = 0;
-        let result = read_line(b"hello\r\n", &mut pos);
+        let result = WireFormat::read_line(b"hello\r\n", &mut pos);
         assert_eq!(result, Some(b"hello".as_ref()));
         assert_eq!(pos, 7);
     }
@@ -568,10 +641,10 @@ mod tests {
     fn test_read_line_multiple() {
         let mut pos = 0;
         let input = b"first\r\nsecond\r\n";
-        let line1 = read_line(input, &mut pos);
+        let line1 = WireFormat::read_line(input, &mut pos);
         assert_eq!(line1, Some(b"first".as_ref()));
         assert_eq!(pos, 7);
-        let line2 = read_line(input, &mut pos);
+        let line2 = WireFormat::read_line(input, &mut pos);
         assert_eq!(line2, Some(b"second".as_ref()));
         assert_eq!(pos, 15);
     }
