@@ -7,6 +7,7 @@ enum Operation {
     Del(Vec<u8>),
 }
 
+#[derive(Debug, PartialEq)]
 enum WireFormat {
     Cmd(Operation),
     SimpleString(String),
@@ -108,7 +109,7 @@ impl From<WireFormat> for Vec<u8> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum WireFormatParseError {
     InvalidCommandEncoding,
     InvalidSimpleStringEncoding,
@@ -395,5 +396,135 @@ mod tests {
             .expect("put operation bytes were valid");
 
         assert_eq!(put_operation, put_operation_back_to_operation);
+    }
+
+    #[test]
+    fn try_from_u8_for_wire_format_empty_bytes() {
+        let input: &[u8] = b"";
+        let actual: Result<WireFormat, WireFormatParseError> = input.try_into();
+        let expected = Err(WireFormatParseError::InvalidCommandEncoding);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn try_from_u8_for_wire_format_unknown_prefix() {
+        let input: &[u8] = b"unknown\r\n";
+        let actual: Result<WireFormat, WireFormatParseError> = input.try_into();
+        let expected = Err(WireFormatParseError::InvalidCommandEncoding);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn try_from_u8_for_wire_format_cmd_put_valid() {
+        let input: &[u8] = b"op\r\nPut\r\n6\r\nKey123\r\n7\r\nValue12\r\n";
+        let actual: Result<WireFormat, WireFormatParseError> = input.try_into();
+        let expected = Ok(WireFormat::Cmd(Put(b"Key123".to_vec(), b"Value12".to_vec())));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn try_from_u8_for_wire_format_cmd_get_valid() {
+        let input: &[u8] = b"op\r\nGet\r\n5\r\nMyKey\r\n";
+        let actual: Result<WireFormat, WireFormatParseError> = input.try_into();
+        let expected = Ok(WireFormat::Cmd(Get(b"MyKey".to_vec())));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn try_from_u8_for_wire_format_cmd_del_valid() {
+        let input: &[u8] = b"op\r\nDel\r\n4\r\nTree\r\n";
+        let actual: Result<WireFormat, WireFormatParseError> = input.try_into();
+        let expected = Ok(WireFormat::Cmd(Del(b"Tree".to_vec())));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn try_from_u8_for_wire_format_cmd_bad_operation() {
+        let input: &[u8] = b"op\r\nInvalid\r\n";
+        let actual: Result<WireFormat, WireFormatParseError> = input.try_into();
+        let expected = Err(WireFormatParseError::OperationError(
+            OperationParseError::UnknownOperation,
+        ));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn try_from_u8_for_wire_format_simple_string_valid() {
+        let input: &[u8] = b"sstr\r\nHello World\r\n";
+        let actual: Result<WireFormat, WireFormatParseError> = input.try_into();
+        let expected = Ok(WireFormat::SimpleString("Hello World".to_string()));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn try_from_u8_for_wire_format_simple_string_empty() {
+        let input: &[u8] = b"sstr\r\n\r\n";
+        let actual: Result<WireFormat, WireFormatParseError> = input.try_into();
+        let expected = Ok(WireFormat::SimpleString("".to_string()));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn try_from_u8_for_wire_format_simple_string_missing_terminator() {
+        let input: &[u8] = b"sstr\r\nHello";
+        let actual: Result<WireFormat, WireFormatParseError> = input.try_into();
+        let expected = Err(WireFormatParseError::InvalidSimpleStringEncoding);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn wire_format_cmd_put_to_string() {
+        let wf = WireFormat::Cmd(Put(b"MyKey".to_vec(), b"MyValue".to_vec()));
+        let actual = wf.to_string();
+        let expected = "op\r\nPut\r\n5\r\nMyKey\r\n7\r\nMyValue\r\n";
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn wire_format_cmd_get_to_string() {
+        let wf = WireFormat::Cmd(Get(b"MyKey".to_vec()));
+        let actual = wf.to_string();
+        let expected = "op\r\nGet\r\n5\r\nMyKey\r\n";
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn wire_format_cmd_del_to_string() {
+        let wf = WireFormat::Cmd(Del(b"MyKey".to_vec()));
+        let actual = wf.to_string();
+        let expected = "op\r\nDel\r\n5\r\nMyKey\r\n";
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn wire_format_simple_string_to_string() {
+        let wf = WireFormat::SimpleString("OK".to_string());
+        let actual = wf.to_string();
+        let expected = "sstr\r\nOK\r\n";
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn wire_format_cmd_to_string_back_to_wire_format() {
+        let wf = WireFormat::Cmd(Put(b"MyKey".to_vec(), b"MyValue".to_vec()));
+        let wf_back: WireFormat = wf
+            .to_string()
+            .into_bytes()
+            .as_slice()
+            .try_into()
+            .expect("wire format bytes were valid");
+        assert_eq!(wf, wf_back);
+    }
+
+    #[test]
+    fn wire_format_simple_string_to_string_back_to_wire_format() {
+        let wf = WireFormat::SimpleString("Hello World".to_string());
+        let wf_back: WireFormat = wf
+            .to_string()
+            .into_bytes()
+            .as_slice()
+            .try_into()
+            .expect("wire format bytes were valid");
+        assert_eq!(wf, wf_back);
     }
 }
