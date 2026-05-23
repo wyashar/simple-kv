@@ -1,14 +1,25 @@
+use crate::kv_store::{KvStore, KvStoreResult};
 use std::fmt;
 
 #[derive(Debug, PartialEq)]
-enum Operation {
+pub enum Operation {
     Put(Vec<u8>, Vec<u8>),
     Get(Vec<u8>),
     Del(Vec<u8>),
 }
 
+impl Operation {
+    pub fn apply(self, store: &mut KvStore) -> KvStoreResult {
+        match self {
+            Operation::Put(key, value) => store.put(key, value),
+            Operation::Get(key) => store.get(&key),
+            Operation::Del(key) => store.del(&key),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
-enum WireFormat {
+pub enum WireFormat {
     Cmd(Operation),
     SimpleString(String),
 }
@@ -178,14 +189,14 @@ impl From<WireFormat> for Vec<u8> {
 }
 
 #[derive(Debug, PartialEq)]
-enum WireFormatParseError {
+pub enum WireFormatParseError {
     InvalidCommandEncoding,
     InvalidSimpleStringEncoding,
     OperationError(OperationParseError),
 }
 
 #[derive(Debug, PartialEq)]
-enum OperationParseError {
+pub enum OperationParseError {
     InvalidOperationEncoding,
     InvalidKeyLenEncoding,
     InvalidKeyEncoding,

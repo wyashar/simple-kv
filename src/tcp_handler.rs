@@ -1,6 +1,8 @@
-use std::io::{BufRead, BufReader};
-use std::net::{TcpListener, SocketAddr, TcpStream};
+use crate::kv_store::KvStore;
+use crate::wire_format::WireFormat;
 use log::{error, info, warn};
+use std::io::Read;
+use std::net::{SocketAddr, TcpListener, TcpStream};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ListenError {
@@ -14,41 +16,44 @@ pub fn listen_on(addr: &str) -> Result<(), ListenError> {
     let parsed_addr = addr.parse::<SocketAddr>()?;
     let listener = TcpListener::bind(parsed_addr)?;
     let local_addr = listener.local_addr()?;
+    let mut store = KvStore::new();
     info!("Listening on {}:{}", local_addr.ip(), local_addr.port());
-    listener
-        .incoming()
-        .for_each( | peer| {
-            match peer {
-                Ok(stream) => handle_connection(&stream),
-                Err(err) => error!("Failed to establish a connection to peer: {:?}", err),
-            }
-        });
+    listener.incoming().for_each(|peer| match peer {
+        Ok(stream) => handle_connection(stream, &mut store),
+        Err(err) => error!("Failed to establish a connection to peer: {:?}", err),
+    });
 
     Ok(())
 }
 
-fn handle_connection(stream: &TcpStream) -> () {
-    info!("Connecting to peer...");
-
+fn handle_connection(mut stream: TcpStream, store: &mut KvStore) {
     let peer_addr = match stream.peer_addr() {
-        Ok(peer_addr) => peer_addr,
+        Ok(addr) => addr,
         Err(err) => {
-            error!("Unable to connect to peer address: {}", err);
+            error!("Unable to get peer address: {}", err);
             return;
         }
     };
 
     info!("Connected to peer: {}", peer_addr);
 
-    for line in BufReader::new(stream).lines() {
-        match line {
-            Ok(l) => info!("{}", l),
-            Err(err) => {
-                warn!("Peer {} disconnected with error: {}", peer_addr, err);
-                return;
-            }
+    let mut buffer = Vec::new();
+    if let Err(err) = stream.read_to_end(&mut buffer) {
+        warn!("Failed to read from peer {}: {}", peer_addr, err);
+        return;
+    }
+
+    match WireFormat::try_from(buffer.as_slice()) {
+        Ok(WireFormat::Cmd(op)) => {
+            op.apply(store);
+        }
+        Ok(WireFormat::SimpleString(_)) => {
+            warn!("Peer {} sent unexpected simple string", peer_addr);
+        }
+        Err(err) => {
+            warn!("Peer {} sent invalid wire format: {:?}", peer_addr, err);
         }
     }
 
-    info!("Client {} successfully disconnected", peer_addr);
+    info!("Client {} disconnected", peer_addr);
 }
