@@ -1,5 +1,6 @@
 use std::io::{BufRead, BufReader};
 use std::net::{TcpListener, SocketAddr, TcpStream};
+use log::{error, info, warn};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ListenError {
@@ -13,13 +14,13 @@ pub fn listen_on(addr: &str) -> Result<(), ListenError> {
     let parsed_addr = addr.parse::<SocketAddr>()?;
     let listener = TcpListener::bind(parsed_addr)?;
     let local_addr = listener.local_addr()?;
-    println!("Listening on {}:{}", local_addr.ip(), local_addr.port());
+    info!("Listening on {}:{}", local_addr.ip(), local_addr.port());
     listener
         .incoming()
         .for_each( | peer| {
             match peer {
                 Ok(stream) => handle_connection(&stream),
-                Err(err) => eprintln!("Failed to establish a connection to peer: {:?}", err),
+                Err(err) => error!("Failed to establish a connection to peer: {:?}", err),
             }
         });
 
@@ -27,28 +28,27 @@ pub fn listen_on(addr: &str) -> Result<(), ListenError> {
 }
 
 fn handle_connection(stream: &TcpStream) -> () {
-    println!("Connecting to peer...");
+    info!("Connecting to peer...");
 
     let peer_addr = match stream.peer_addr() {
         Ok(peer_addr) => peer_addr,
         Err(err) => {
-            eprintln!("Unable to connect to peer address: {}", err);
+            error!("Unable to connect to peer address: {}", err);
             return;
         }
     };
 
-
-    println!("Connected to peer: {}", peer_addr);
+    info!("Connected to peer: {}", peer_addr);
 
     for line in BufReader::new(stream).lines() {
         match line {
-            Ok(l) => println!("{}", l),
+            Ok(l) => info!("{}", l),
             Err(err) => {
-                eprintln!("Peer {} disconnected with error: {}", peer_addr, err);
+                warn!("Peer {} disconnected with error: {}", peer_addr, err);
                 return;
             }
         }
     }
 
-    println!("Client {} successfully disconnected", peer_addr);
+    info!("Client {} successfully disconnected", peer_addr);
 }

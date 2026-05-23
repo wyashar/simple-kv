@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::tcp_handler::ListenError;
+use env_logger;
 
 mod tcp_handler;
 mod config;
@@ -8,6 +9,7 @@ pub mod kv_store;
 
 fn main() {
     dotenvy::dotenv().ok();
+    env_logger::init();
     
     let config: Config = Config::new().unwrap_or_else(|e| panic!("{}", e));
 
