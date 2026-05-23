@@ -19,7 +19,7 @@ impl TryFrom<&[u8]> for WireFormat {
     fn try_from(input: &[u8]) -> Result<Self, Self::Error> {
         let mut pos = 0;
 
-        let first_line = WireFormat::read_line(input, &mut pos)
+        let first_line = WireFormat::read_until_carriage_return(input, &mut pos)
             .ok_or(WireFormatParseError::InvalidCommandEncoding)?;
         let first_line_str = std::str::from_utf8(first_line)
             .map_err(|_| WireFormatParseError::InvalidCommandEncoding)?;
@@ -32,7 +32,7 @@ impl TryFrom<&[u8]> for WireFormat {
                 Ok(WireFormat::Cmd(result))
             }
             "sstr" => {
-                let simple_str_bytes = WireFormat::read_line(input, &mut pos)
+                let simple_str_bytes = WireFormat::read_until_carriage_return(input, &mut pos)
                     .ok_or(WireFormatParseError::InvalidSimpleStringEncoding)?;
                 let simple_str = std::str::from_utf8(simple_str_bytes)
                     .map_err(|_| WireFormatParseError::InvalidSimpleStringEncoding)?
@@ -46,44 +46,72 @@ impl TryFrom<&[u8]> for WireFormat {
 }
 
 impl WireFormat {
-    fn read_line<'a>(input: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
+    fn read_until_carriage_return<'a>(input: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
+        // our wireformat has carriage returns to deliminate each line
+        // keys and values are not byte safe, meaning they may include carriage returns in the content itself
+        // but we are guarenteed non-key, non-value data does not include carriage returns (e.g. PUT\r\n, 15\r\n, etc etc)
         let remaining = input.get(*pos..)?;
         let crlf = remaining.windows(2).position(|w| w == b"\r\n")?;
         let line = &remaining[..crlf];
+        // read from pos onward until we hit a carriage return, consume the carriage return, then return the bytes back out
         *pos += crlf + 2;
 
         Some(line)
     }
+
+    fn read_n_bytes_and_carriage_return<'a>(
+        n: usize,
+        input: &'a [u8],
+        pos: &mut usize,
+    ) -> Option<&'a [u8]> {
+        // wireformat allows for keys and values to be non-byte-safe, meaning they can contain carriage returns
+        // therefore we need to parse n bytes as encoded in the wireformat
+        let data = input.get(*pos..*pos + n)?;
+        if input.get(*pos + n..*pos + n + 2)? != b"\r\n" {
+            return None;
+        }
+        *pos += n + 2;
+
+        Some(data)
+    }
 }
 
 impl fmt::Display for Operation {
-    // Keys and/or Values of Operation variants here are guaranteed to be valid UTF8 here
-    // This is b/c TryFrom<&[u8]> for Operation enforces it, and it's the only way to construct this Operation type
-    // hence we can use String::from_utf8_lossy here
-    // note that it's the same performance as std::str::from_utf8(s).unwrap()
-    // because String::from_utf8_lossy(str) returns Cow<str>
+    // NOTE: This is purely for human readable string representations of the Operation
+    // Operation => String => Operation may fail because the keys and values are not byte safe,
+    // therefore not guarenteed to be Valid UTF8!
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Operation::Put(key, value) => write!(
-                f,
-                "Put\r\n{}\r\n{}\r\n{}\r\n{}\r\n",
-                key.len(),
-                String::from_utf8_lossy(key),
-                value.len(),
-                String::from_utf8_lossy(value)
-            ),
-            Operation::Get(key) => write!(
-                f,
-                "Get\r\n{}\r\n{}\r\n",
-                key.len(),
-                String::from_utf8_lossy(key)
-            ),
-            Operation::Del(key) => write!(
-                f,
-                "Del\r\n{}\r\n{}\r\n",
-                key.len(),
-                String::from_utf8_lossy(key)
-            ),
+            Operation::Put(key, value) => {
+                let key_utf8_lossy = String::from_utf8_lossy(key);
+                let value_utf8_losssy = String::from_utf8_lossy(value);
+                write!(
+                    f,
+                    "Put\r\n{}\r\n{}\r\n{}\r\n{}\r\n",
+                    key_utf8_lossy.len(),
+                    key_utf8_lossy,
+                    value_utf8_losssy.len(),
+                    value_utf8_losssy
+                )
+            }
+            Operation::Get(key) => {
+                let key_utf8_lossy = String::from_utf8_lossy(key);
+                write!(
+                    f,
+                    "Get\r\n{}\r\n{}\r\n",
+                    key_utf8_lossy.len(),
+                    key_utf8_lossy
+                )
+            }
+            Operation::Del(key) => {
+                let key_utf8_lossy = String::from_utf8_lossy(key);
+                write!(
+                    f,
+                    "Del\r\n{}\r\n{}\r\n",
+                    key_utf8_lossy.len(),
+                    key_utf8_lossy
+                )
+            }
         }
     }
 }
@@ -99,13 +127,53 @@ impl fmt::Display for WireFormat {
 
 impl From<Operation> for Vec<u8> {
     fn from(op: Operation) -> Self {
-        op.to_string().into_bytes()
+        let mut buf = Vec::new();
+        match op {
+            Operation::Put(key, value) => {
+                buf.extend_from_slice(b"Put\r\n");
+                buf.extend_from_slice(key.len().to_string().as_bytes());
+                buf.extend_from_slice(b"\r\n");
+                buf.extend_from_slice(&key);
+                buf.extend_from_slice(b"\r\n");
+                buf.extend_from_slice(value.len().to_string().as_bytes());
+                buf.extend_from_slice(b"\r\n");
+                buf.extend_from_slice(&value);
+                buf.extend_from_slice(b"\r\n");
+            }
+            Operation::Get(key) => {
+                buf.extend_from_slice(b"Get\r\n");
+                buf.extend_from_slice(key.len().to_string().as_bytes());
+                buf.extend_from_slice(b"\r\n");
+                buf.extend_from_slice(&key);
+                buf.extend_from_slice(b"\r\n");
+            }
+            Operation::Del(key) => {
+                buf.extend_from_slice(b"Del\r\n");
+                buf.extend_from_slice(key.len().to_string().as_bytes());
+                buf.extend_from_slice(b"\r\n");
+                buf.extend_from_slice(&key);
+                buf.extend_from_slice(b"\r\n");
+            }
+        }
+        buf
     }
 }
 
 impl From<WireFormat> for Vec<u8> {
     fn from(wf: WireFormat) -> Self {
-        wf.to_string().into_bytes()
+        let mut buf = Vec::new();
+        match wf {
+            WireFormat::Cmd(op) => {
+                buf.extend_from_slice(b"op\r\n");
+                buf.extend(Vec::<u8>::from(op));
+            }
+            WireFormat::SimpleString(s) => {
+                buf.extend_from_slice(b"sstr\r\n");
+                buf.extend_from_slice(s.as_bytes());
+                buf.extend_from_slice(b"\r\n");
+            }
+        }
+        buf
     }
 }
 
@@ -132,7 +200,7 @@ impl TryFrom<&[u8]> for Operation {
     fn try_from(input: &[u8]) -> Result<Self, Self::Error> {
         let mut pos = 0;
 
-        let op_line = WireFormat::read_line(input, &mut pos)
+        let op_line = WireFormat::read_until_carriage_return(input, &mut pos)
             .ok_or(OperationParseError::InvalidOperationEncoding)?;
         let operation_str = std::str::from_utf8(op_line)
             .map_err(|_| OperationParseError::InvalidOperationEncoding)
@@ -141,34 +209,29 @@ impl TryFrom<&[u8]> for Operation {
                 _ => Err(OperationParseError::UnknownOperation),
             })?;
 
-        let key_len_line = WireFormat::read_line(input, &mut pos)
+        let key_len_line = WireFormat::read_until_carriage_return(input, &mut pos)
             .ok_or(OperationParseError::InvalidKeyLenEncoding)?;
         let key_len: usize = std::str::from_utf8(key_len_line)
             .map_err(|_| OperationParseError::InvalidKeyLenEncoding)?
             .parse()
             .map_err(|_| OperationParseError::InvalidKeyLenEncoding)?;
 
-        let key_line = WireFormat::read_line(input, &mut pos)
+        let key_line = WireFormat::read_n_bytes_and_carriage_return(key_len, input, &mut pos)
             .ok_or(OperationParseError::InvalidKeyEncoding)?;
-        if key_line.len() != key_len {
-            return Err(OperationParseError::InvalidKeyEncoding);
-        }
         let key = key_line.to_vec();
 
         match operation_str {
             "Put" => {
-                let value_len_line = WireFormat::read_line(input, &mut pos)
+                let value_len_line = WireFormat::read_until_carriage_return(input, &mut pos)
                     .ok_or(OperationParseError::InvalidValueLenEncoding)?;
                 let value_len: usize = std::str::from_utf8(value_len_line)
                     .map_err(|_| OperationParseError::InvalidValueLenEncoding)?
                     .parse()
                     .map_err(|_| OperationParseError::InvalidValueLenEncoding)?;
 
-                let value_line = WireFormat::read_line(input, &mut pos)
-                    .ok_or(OperationParseError::InvalidValueEncoding)?;
-                if value_line.len() != value_len {
-                    return Err(OperationParseError::InvalidValueEncoding);
-                }
+                let value_line =
+                    WireFormat::read_n_bytes_and_carriage_return(value_len, input, &mut pos)
+                        .ok_or(OperationParseError::InvalidValueEncoding)?;
                 let value = value_line.to_vec();
 
                 if pos != input.len() {
@@ -383,22 +446,6 @@ mod tests {
     }
 
     #[test]
-    fn put_operation_to_string_back_to_operation() {
-        let key_bytes: Vec<u8> = b"MyKey".to_vec();
-        let value_bytes: Vec<u8> = b"MyValue".to_vec();
-        let put_operation: Operation = Put(key_bytes, value_bytes);
-
-        let put_operation_as_string: String = put_operation.to_string();
-        let put_operation_back_to_operation: Operation = put_operation_as_string
-            .into_bytes()
-            .as_slice()
-            .try_into()
-            .expect("put operation bytes were valid");
-
-        assert_eq!(put_operation, put_operation_back_to_operation);
-    }
-
-    #[test]
     fn try_from_u8_for_wire_format_empty_bytes() {
         let input: &[u8] = b"";
         let actual: Result<WireFormat, WireFormatParseError> = input.try_into();
@@ -418,7 +465,10 @@ mod tests {
     fn try_from_u8_for_wire_format_cmd_put_valid() {
         let input: &[u8] = b"op\r\nPut\r\n6\r\nKey123\r\n7\r\nValue12\r\n";
         let actual: Result<WireFormat, WireFormatParseError> = input.try_into();
-        let expected = Ok(WireFormat::Cmd(Put(b"Key123".to_vec(), b"Value12".to_vec())));
+        let expected = Ok(WireFormat::Cmd(Put(
+            b"Key123".to_vec(),
+            b"Value12".to_vec(),
+        )));
         assert_eq!(actual, expected);
     }
 
@@ -526,5 +576,41 @@ mod tests {
             .try_into()
             .expect("wire format bytes were valid");
         assert_eq!(wf, wf_back);
+    }
+
+    #[test]
+    fn try_from_u8_for_operation_get_key_contains_crlf() {
+        let wire_bytes: &[u8] = b"Get\r\n8\r\nfoo\r\nbar\r\n";
+        let actual: Result<Operation, OperationParseError> = wire_bytes.try_into();
+
+        let key_bytes: Vec<u8> = b"foo\r\nbar".to_vec();
+        let expected: Result<Operation, OperationParseError> = Ok(Get(key_bytes));
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn try_from_u8_for_operation_put_value_contains_crlf() {
+        let wire_bytes: &[u8] = b"Put\r\n1\r\nk\r\n4\r\nv\r\nw\r\n";
+        let actual: Result<Operation, OperationParseError> = wire_bytes.try_into();
+
+        let key_bytes: Vec<u8> = b"k".to_vec();
+        let value_bytes: Vec<u8> = b"v\r\nw".to_vec();
+        let expected: Result<Operation, OperationParseError> = Ok(Put(key_bytes, value_bytes));
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn operation_to_string_back_to_operation_is_lossy_for_non_utf8_bytes() {
+        let original = Get(vec![0xFF]);
+        let roundtripped: Operation = original
+            .to_string()
+            .into_bytes()
+            .as_slice()
+            .try_into()
+            .expect("parser succeeds but produces corrupted bytes");
+
+        assert_ne!(original, roundtripped);
     }
 }
