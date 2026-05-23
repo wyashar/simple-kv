@@ -1,7 +1,6 @@
 use std::fmt;
 
-#[derive(Debug)]
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum Operation {
     Put(Vec<u8>, Vec<u8>),
     Get(Vec<u8>),
@@ -10,25 +9,9 @@ enum Operation {
 
 enum WireFormat {
     Cmd(Operation),
-    SimpleString(String)
+    SimpleString(String),
 }
 
-/*
-    op\r\n
-    Put\r\n
-    5\r\n
-    MyKey\r\n
-    7\r\n
-    MyValue
-
-    op\r\n
-    Get\r\n
-    5\r\n
-    MyKey\r\n
-
-    sstr\r\n
-    Hello!\r\n
- */
 impl TryFrom<&[u8]> for WireFormat {
     type Error = WireFormatParseError;
 
@@ -40,24 +23,24 @@ impl TryFrom<&[u8]> for WireFormat {
         let first_line_str = std::str::from_utf8(first_line)
             .map_err(|_| WireFormatParseError::InvalidCommandEncoding)?;
 
-         match first_line_str {
-             "op" => {
-                 let result = Operation::try_from(&input[pos..])
-                     .map_err(|e| WireFormatParseError::OperationError(e))?;
+        match first_line_str {
+            "op" => {
+                let result: Operation = Operation::try_from(&input[pos..])
+                    .map_err(|e| WireFormatParseError::OperationError(e))?;
 
-                 Ok(WireFormat::Cmd(result))
-             },
-             "sstr" => {
-                 let simple_str_bytes = WireFormat::read_line(input, &mut pos)
-                     .ok_or(WireFormatParseError::InvalidSimpleStringEncoding)?;
-                 let simple_str = std::str::from_utf8(simple_str_bytes)
-                     .map_err(|_| WireFormatParseError::InvalidSimpleStringEncoding)?
-                     .to_string();
+                Ok(WireFormat::Cmd(result))
+            }
+            "sstr" => {
+                let simple_str_bytes = WireFormat::read_line(input, &mut pos)
+                    .ok_or(WireFormatParseError::InvalidSimpleStringEncoding)?;
+                let simple_str = std::str::from_utf8(simple_str_bytes)
+                    .map_err(|_| WireFormatParseError::InvalidSimpleStringEncoding)?
+                    .to_string();
 
-                 Ok(WireFormat::SimpleString(simple_str))
-             },
-             _ => Err(WireFormatParseError::InvalidCommandEncoding)
-         }
+                Ok(WireFormat::SimpleString(simple_str))
+            }
+            _ => Err(WireFormatParseError::InvalidCommandEncoding),
+        }
     }
 }
 
@@ -80,29 +63,26 @@ impl fmt::Display for Operation {
     // because String::from_utf8_lossy(str) returns Cow<str>
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Operation::Put(key, value) =>
-                write!(
-                    f,
-                    "Put\r\n{}\r\n{}\r\n{}\r\n{}\r\n",
-                    key.len(),
-                    String::from_utf8_lossy(key),
-                    value.len(),
-                    String::from_utf8_lossy(value)
-                ),
-            Operation::Get(key) =>
-                write!(
-                    f,
-                   "Get\r\n{}\r\n{}\r\n",
-                   key.len(),
-                   String::from_utf8_lossy(key)
-                ),
-            Operation::Del(key) =>
-                write!(
-                    f,
-                    "Del\r\n{}\r\n{}\r\n",
-                    key.len(),
-                    String::from_utf8_lossy(key)
-                ),
+            Operation::Put(key, value) => write!(
+                f,
+                "Put\r\n{}\r\n{}\r\n{}\r\n{}\r\n",
+                key.len(),
+                String::from_utf8_lossy(key),
+                value.len(),
+                String::from_utf8_lossy(value)
+            ),
+            Operation::Get(key) => write!(
+                f,
+                "Get\r\n{}\r\n{}\r\n",
+                key.len(),
+                String::from_utf8_lossy(key)
+            ),
+            Operation::Del(key) => write!(
+                f,
+                "Del\r\n{}\r\n{}\r\n",
+                key.len(),
+                String::from_utf8_lossy(key)
+            ),
         }
     }
 }
@@ -110,18 +90,8 @@ impl fmt::Display for Operation {
 impl fmt::Display for WireFormat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            WireFormat::Cmd(op) =>
-                write!(
-                    f,
-                    "op\r\n{}",
-                    op
-                ),
-            WireFormat::SimpleString(s) =>
-                write!(
-                    f,
-                    "sstr\r\n{}\r\n",
-                    s
-                )
+            WireFormat::Cmd(op) => write!(f, "op\r\n{}", op),
+            WireFormat::SimpleString(s) => write!(f, "sstr\r\n{}\r\n", s),
         }
     }
 }
@@ -142,7 +112,7 @@ impl From<WireFormat> for Vec<u8> {
 enum WireFormatParseError {
     InvalidCommandEncoding,
     InvalidSimpleStringEncoding,
-    OperationError(OperationParseError)
+    OperationError(OperationParseError),
 }
 
 #[derive(Debug, PartialEq)]
@@ -153,7 +123,7 @@ enum OperationParseError {
     InvalidValueLenEncoding,
     InvalidValueEncoding,
     UnknownOperation,
-    TooManyParts
+    TooManyParts,
 }
 
 impl TryFrom<&[u8]> for Operation {
@@ -167,7 +137,7 @@ impl TryFrom<&[u8]> for Operation {
             .map_err(|_| OperationParseError::InvalidOperationEncoding)
             .and_then(|s| match s {
                 "Put" | "Del" | "Get" => Ok(s),
-                _ => Err(OperationParseError::UnknownOperation)
+                _ => Err(OperationParseError::UnknownOperation),
             })?;
 
         let key_len_line = WireFormat::read_line(input, &mut pos)
@@ -225,14 +195,15 @@ impl TryFrom<&[u8]> for Operation {
 
 #[cfg(test)]
 mod tests {
-    use crate::wire_format::Operation::{Del, Get, Put};
     use super::*;
+    use crate::wire_format::Operation::{Del, Get, Put};
 
     #[test]
     fn try_from_u8_for_operation_bad_operation_bytes() {
         let bad_bytes: &[u8] = b"hello!\r\n".as_slice();
         let actual: Result<Operation, OperationParseError> = bad_bytes.try_into();
-        let expected: Result<Operation, OperationParseError> = Err(OperationParseError::UnknownOperation);
+        let expected: Result<Operation, OperationParseError> =
+            Err(OperationParseError::UnknownOperation);
 
         assert_eq!(actual, expected);
     }
@@ -241,7 +212,8 @@ mod tests {
     fn try_from_u8_for_operation_empty_byte_arr() {
         let empty_byte_arr: &[u8] = b"".as_slice();
         let actual: Result<Operation, OperationParseError> = empty_byte_arr.try_into();
-        let expected: Result<Operation, OperationParseError> = Err(OperationParseError::InvalidOperationEncoding);
+        let expected: Result<Operation, OperationParseError> =
+            Err(OperationParseError::InvalidOperationEncoding);
 
         assert_eq!(actual, expected);
     }
@@ -250,7 +222,8 @@ mod tests {
     fn try_from_u8_for_operation_bad_operator() {
         let byte_arry: &[u8] = b"InvalidOperation\r\n";
         let actual: Result<Operation, OperationParseError> = byte_arry.try_into();
-        let expected: Result<Operation, OperationParseError> = Err(OperationParseError::UnknownOperation);
+        let expected: Result<Operation, OperationParseError> =
+            Err(OperationParseError::UnknownOperation);
 
         assert_eq!(actual, expected);
     }
@@ -259,7 +232,8 @@ mod tests {
     fn try_from_u8_for_operation_bad_key_len() {
         let byte_arr: &[u8] = b"Put\r\nHello\r\n";
         let actual: Result<Operation, OperationParseError> = byte_arr.try_into();
-        let expected: Result<Operation, OperationParseError> = Err(OperationParseError::InvalidKeyLenEncoding);
+        let expected: Result<Operation, OperationParseError> =
+            Err(OperationParseError::InvalidKeyLenEncoding);
 
         assert_eq!(actual, expected);
     }
@@ -268,7 +242,8 @@ mod tests {
     fn try_from_u8_for_operation_mismatch_key_len() {
         let byte_arr: &[u8] = b"Get\r\n5\r\nNotFive\r\n";
         let actual: Result<Operation, OperationParseError> = byte_arr.try_into();
-        let expected: Result<Operation, OperationParseError> = Err(OperationParseError::InvalidKeyEncoding);
+        let expected: Result<Operation, OperationParseError> =
+            Err(OperationParseError::InvalidKeyEncoding);
 
         assert_eq!(actual, expected);
     }
@@ -277,7 +252,8 @@ mod tests {
     fn try_from_u8_for_operation_bad_value_len_encoding() {
         let byte_arr: &[u8] = b"Put\r\n5\r\n12345\r\nInvalidLen";
         let actual: Result<Operation, OperationParseError> = byte_arr.try_into();
-        let expected: Result<Operation, OperationParseError> = Err(OperationParseError::InvalidValueLenEncoding);
+        let expected: Result<Operation, OperationParseError> =
+            Err(OperationParseError::InvalidValueLenEncoding);
 
         assert_eq!(actual, expected);
     }
@@ -286,7 +262,8 @@ mod tests {
     fn try_from_u8_for_operation_value_len_mismatch() {
         let byte_arr: &[u8] = b"Put\r\n5\r\n12345\r\n6\r\nSeven";
         let actual: Result<Operation, OperationParseError> = byte_arr.try_into();
-        let expected: Result<Operation, OperationParseError> = Err(OperationParseError::InvalidValueEncoding);
+        let expected: Result<Operation, OperationParseError> =
+            Err(OperationParseError::InvalidValueEncoding);
 
         assert_eq!(actual, expected);
     }
@@ -295,7 +272,8 @@ mod tests {
     fn try_from_u8_for_operation_byte_arr_too_long() {
         let byte_arr: &[u8] = b"Put\r\n5\r\n12345\r\n6\r\nSixSix\r\nEvenMore";
         let actual: Result<Operation, OperationParseError> = byte_arr.try_into();
-        let expected: Result<Operation, OperationParseError> = Err(OperationParseError::TooManyParts);
+        let expected: Result<Operation, OperationParseError> =
+            Err(OperationParseError::TooManyParts);
 
         assert_eq!(actual, expected);
     }
@@ -304,7 +282,8 @@ mod tests {
     fn try_from_u8_for_operation_byte_arr_too_long_2() {
         let byte_arr: &[u8] = b"Get\r\n5\r\n12345\r\n6";
         let actual: Result<Operation, OperationParseError> = byte_arr.try_into();
-        let expected: Result<Operation, OperationParseError> = Err(OperationParseError::TooManyParts);
+        let expected: Result<Operation, OperationParseError> =
+            Err(OperationParseError::TooManyParts);
 
         assert_eq!(actual, expected);
     }
@@ -366,5 +345,55 @@ mod tests {
         let expected: Result<Operation, OperationParseError> = Ok(Del(key_bytes));
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn put_to_string_works() {
+        let key_bytes: Vec<u8> = b"MyKey".to_vec();
+        let value_bytes: Vec<u8> = b"MyValue".to_vec();
+        let put_operation: Operation = Put(key_bytes, value_bytes);
+
+        let actual: String = put_operation.to_string();
+        let expected: &str = "Put\r\n5\r\nMyKey\r\n7\r\nMyValue\r\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn get_to_string_works() {
+        let key_bytes: Vec<u8> = b"12345".to_vec();
+        let get_operation: Operation = Get(key_bytes);
+
+        let actual: String = get_operation.to_string();
+        let expected: &str = "Get\r\n5\r\n12345\r\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn del_to_string_works() {
+        let key_bytes: Vec<u8> = b"DeleteMyDataNow.Com".to_vec();
+        let del_operation: Operation = Del(key_bytes);
+
+        let actual: String = del_operation.to_string();
+        let expected: &str = "Del\r\n19\r\nDeleteMyDataNow.Com\r\n";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn put_operation_to_string_back_to_operation() {
+        let key_bytes: Vec<u8> = b"MyKey".to_vec();
+        let value_bytes: Vec<u8> = b"MyValue".to_vec();
+        let put_operation: Operation = Put(key_bytes, value_bytes);
+
+        let put_operation_as_string: String = put_operation.to_string();
+        let put_operation_back_to_operation: Operation = put_operation_as_string
+            .into_bytes()
+            .as_slice()
+            .try_into()
+            .expect("put operation bytes were valid");
+
+        assert_eq!(put_operation, put_operation_back_to_operation);
     }
 }
