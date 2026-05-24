@@ -44,15 +44,13 @@ fn handle_connection(mut stream: TcpStream, store: &mut KvStore) {
     }
 
     match WireFormat::try_from(buffer.as_slice()) {
-        Ok(WireFormat::Cmd(op)) => {
-            op.apply(store);
-        }
-        Ok(WireFormat::SimpleString(_)) => {
-            warn!("Peer {} sent unexpected simple string", peer_addr);
-        }
-        Err(err) => {
-            warn!("Peer {} sent invalid wire format: {:?}", peer_addr, err);
-        }
+        Ok(wf) => match wf.into_command() {
+            Some(op) => {
+                op.apply(store);
+            }
+            None => warn!("Peer {} sent a non-command wire message", peer_addr),
+        },
+        Err(err) => warn!("Peer {} sent invalid wire format: {:?}", peer_addr, err),
     }
 
     info!("Client {} disconnected", peer_addr);
