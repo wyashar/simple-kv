@@ -5,7 +5,6 @@ use log::error;
 
 mod config;
 mod kv_store;
-mod tcp_handler;
 mod tcp_server;
 mod wire_format;
 
