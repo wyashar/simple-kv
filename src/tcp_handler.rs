@@ -12,8 +12,8 @@ pub enum ListenError {
     Io(#[from] std::io::Error),
 }
 
-pub fn listen_on(addr: &str) -> Result<(), ListenError> {
-    let parsed_addr = addr.parse::<SocketAddr>()?;
+pub fn listen_on(address: &str, port: &u16) -> Result<(), ListenError> {
+    let parsed_addr = &format!("{}:{}", address, port).parse::<SocketAddr>()?;
     let listener = TcpListener::bind(parsed_addr)?;
     let local_addr = listener.local_addr()?;
     let mut store = KvStore::new();
@@ -45,8 +45,8 @@ fn handle_connection(mut stream: TcpStream, store: &mut KvStore) {
 
     match WireFormat::try_from(buffer.as_slice()) {
         Ok(wf) => match wf.into_command() {
-            Some(op) => {
-                op.apply(store);
+            Some(operation) => {
+                operation.apply(store);
             }
             None => warn!("Peer {} sent a non-command wire message", peer_addr),
         },

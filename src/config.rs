@@ -1,17 +1,17 @@
 pub struct Config {
-    pub listener_address: String,
-    pub listener_port: u16,
+    pub server_address: String,
+    pub server_port: u16,
 }
 
-const LISTENER_ADDRESS_ENV: &str = "LISTENER_ADDRESS";
-const LISTENER_PORT_ENV: &str = "LISTENER_PORT";
+const SERVER_ADDRESS_ENV: &str = "SERVER_ADDRESS";
+const SERVER_PORT_ENV: &str = "SERVER_PORT";
 
 #[derive(thiserror::Error, Debug)]
 pub enum ConfigError {
-    #[error("missing listener address")]
-    MissingListenerAddress,
-    #[error("missing listener port")]
-    MissingListenerPort,
+    #[error("missing server address")]
+    MissingServerAddress,
+    #[error("missing server port")]
+    MissingServerPort,
     #[error("invalid port: {0}")]
     InvalidPort(#[from] std::num::ParseIntError),
     #[error("port must be a valid u16")]
@@ -19,18 +19,95 @@ pub enum ConfigError {
 }
 
 impl Config {
-    pub fn new() -> Result<Self, ConfigError> {
-        let listener_address =
-            std::env::var(LISTENER_ADDRESS_ENV).map_err(|_| ConfigError::MissingListenerAddress)?;
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let server_address =
+            std::env::var(SERVER_ADDRESS_ENV).map_err(|_| ConfigError::MissingServerAddress)?;
 
-        let listener_port = std::env::var(LISTENER_PORT_ENV)
-            .map_err(|_| ConfigError::MissingListenerPort)?
+        let server_port = std::env::var(SERVER_PORT_ENV)
+            .map_err(|_| ConfigError::MissingServerPort)?
             .parse::<u16>()
             .map_err(|_| ConfigError::InvalidPortFormat)?;
 
-        Ok(Config {
-            listener_address,
-            listener_port,
+        Ok(Self {
+            server_address,
+            server_port,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    fn reset_env() {
+        unsafe {
+            std::env::remove_var(SERVER_ADDRESS_ENV);
+            std::env::remove_var(SERVER_PORT_ENV);
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn from_env_succeeds_with_valid_input() {
+        reset_env();
+        unsafe {
+            std::env::set_var(SERVER_ADDRESS_ENV, "127.0.0.1");
+            std::env::set_var(SERVER_PORT_ENV, "8080");
+        }
+
+        let config = Config::from_env().unwrap();
+        assert_eq!(config.server_address, "127.0.0.1");
+        assert_eq!(config.server_port, 8080);
+    }
+
+    #[test]
+    #[serial]
+    fn from_env_fails_when_no_server_address() {
+        reset_env();
+        unsafe {
+            std::env::set_var(SERVER_PORT_ENV, "8080");
+        }
+
+        let result = Config::from_env();
+        assert!(matches!(result, Err(ConfigError::MissingServerAddress)));
+    }
+
+    #[test]
+    #[serial]
+    fn from_env_fails_when_no_server_port() {
+        reset_env();
+        unsafe {
+            std::env::set_var(SERVER_ADDRESS_ENV, "127.0.0.1");
+        }
+
+        let result = Config::from_env();
+        assert!(matches!(result, Err(ConfigError::MissingServerPort)));
+    }
+
+    #[test]
+    #[serial]
+    fn from_env_fails_when_port_is_not_numeric() {
+        reset_env();
+        unsafe {
+            std::env::set_var(SERVER_ADDRESS_ENV, "127.0.0.1");
+            std::env::set_var(SERVER_PORT_ENV, "not-a-number");
+        }
+
+        let result = Config::from_env();
+        assert!(matches!(result, Err(ConfigError::InvalidPortFormat)));
+    }
+
+    #[test]
+    #[serial]
+    fn from_env_fails_when_port_overflows_u16() {
+        reset_env();
+        unsafe {
+            std::env::set_var(SERVER_ADDRESS_ENV, "127.0.0.1");
+            std::env::set_var(SERVER_PORT_ENV, "70000");
+        }
+
+        let result = Config::from_env();
+        assert!(matches!(result, Err(ConfigError::InvalidPortFormat)));
     }
 }

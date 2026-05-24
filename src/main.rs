@@ -1,23 +1,22 @@
 use crate::config::Config;
-use crate::tcp_handler::ListenError;
+use crate::tcp_server::TcpServer;
 use env_logger;
+use log::error;
 
-mod tcp_handler;
 mod config;
+mod kv_store;
+mod tcp_handler;
+mod tcp_server;
 mod wire_format;
-pub mod kv_store;
 
 fn main() {
     dotenvy::dotenv().ok();
     env_logger::init();
-    
-    let config: Config = Config::new().unwrap_or_else(|e| panic!("{}", e));
 
-    match tcp_handler::listen_on(&format!("{}:{}", config.listener_address, config.listener_port)) {
-        Err(e) => match e {
-            ListenError::AddrParse(e) => panic!("Failed to parse listening addr: {:?}", e),
-            ListenError::Io(e) => panic!("Couldn't listen on: {:?}", e)
-        },
-        _ => (),
-    };
+    let config: Config = Config::from_env().unwrap_or_else(|e| panic!("{}", e));
+    let tcp_server: TcpServer = TcpServer::bind(&config.server_address, config.server_port)
+        .unwrap_or_else(|e| {
+            error!("Failed to start tcp server: {e}");
+            std::process::exit(1);
+        });
 }
