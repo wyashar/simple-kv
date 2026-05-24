@@ -4,7 +4,6 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
 };
 
-#[derive(Debug)]
 pub enum TcpServerError {
     InvalidSocketAddressFormat(String),
     InvalidPort(u16),
