@@ -1,12 +1,14 @@
 use crate::kv_store::{KvStore, KvStoreResult};
 use std::{fmt, io::BufRead};
+use strum::VariantNames;
 
 #[derive(Debug, PartialEq)]
 pub struct Operation {
     kind: OperationKind,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, strum::VariantNames)]
+#[strum(serialize_all = "PascalCase")]
 enum OperationKind {
     Put(Vec<u8>, Vec<u8>),
     Get(Vec<u8>),
@@ -29,7 +31,7 @@ impl Operation {
             .map_err(|_| OperationParseError::InvalidOperationEncoding)
             .and_then(|s| match s {
                 "Put" | "Get" | "Del" => Ok(s),
-                _ => Err(OperationParseError::UnknownOperation),
+                _ => Err(OperationParseError::UnknownOperation(s.to_owned())),
             })?;
 
         let mut key_length_bytes: Vec<u8> = Vec::new();
@@ -127,7 +129,7 @@ pub struct WireFormat {
     kind: WireFormatKind,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, strum::VariantNames)]
 enum WireFormatKind {
     Cmd(Operation),
     SimpleString(String),
@@ -159,18 +161,22 @@ impl WireFormat {
         let mut first_line_bytes: Vec<u8> = Vec::new();
         reader
             .read_until(b'\n', &mut first_line_bytes)
-            .map_err(|_| WireFormatParseError::InvalidCommandEncoding)?;
+            .map_err(|_| WireFormatParseError::InvalidTypeEncoding)?;
 
         let first_line_trimmed = first_line_bytes
             .strip_suffix(b"\r\n")
-            .ok_or(WireFormatParseError::InvalidCommandEncoding)?;
+            .ok_or(WireFormatParseError::InvalidTypeEncoding)?;
         let first_line_str: &str = std::str::from_utf8(first_line_trimmed)
-            .map_err(|_| WireFormatParseError::InvalidCommandEncoding)?;
+            .map_err(|_| WireFormatParseError::InvalidTypeEncoding)
+            .and_then(|s| match s {
+                "op" | "sstr" => Ok(s),
+                _ => Err(WireFormatParseError::UnknownType(s.to_owned())),
+            })?;
 
         match first_line_str {
             "op" => {
-                let operation =
-                    Operation::from_reader(reader).map_err(WireFormatParseError::OperationError)?;
+                let operation = Operation::from_reader(reader)
+                    .map_err(WireFormatParseError::InvalidCmdEncoding)?;
                 Ok(WireFormat::cmd(operation))
             }
             "sstr" => {
@@ -188,7 +194,7 @@ impl WireFormat {
 
                 Ok(WireFormat::simple_string(simple_str))
             }
-            _ => Err(WireFormatParseError::InvalidCommandEncoding),
+            _ => unreachable!("all WireFormat type identifiers were validated during type parsing"),
         }
     }
 }
@@ -296,9 +302,32 @@ impl From<WireFormat> for Vec<u8> {
 
 #[derive(Debug, PartialEq)]
 pub enum WireFormatParseError {
-    InvalidCommandEncoding,
+    InvalidTypeEncoding,
+    UnknownType(String),
+    InvalidCmdEncoding(OperationParseError),
     InvalidSimpleStringEncoding,
-    OperationError(OperationParseError),
+}
+
+impl fmt::Display for WireFormatParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidTypeEncoding => write!(
+                f,
+                "Failed to deserialize WireFormat, expected a type identifier (one of {:?}) followed by a CRLF!",
+                WireFormatKind::VARIANTS
+            ),
+            Self::UnknownType(unknown_type) => write!(
+                f,
+                "Failed to deserialize WireFormat, expected one of {:?}, got: {unknown_type}",
+                WireFormatKind::VARIANTS
+            ),
+            Self::InvalidCmdEncoding(err) => write!(f, "{err}"),
+            Self::InvalidSimpleStringEncoding => write!(
+                f,
+                "Failed to deserialize WireFormat, expected a UTF-8 string followed by a CRLF!"
+            ),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -308,7 +337,39 @@ pub enum OperationParseError {
     InvalidKeyEncoding,
     InvalidValueLenEncoding,
     InvalidValueEncoding,
-    UnknownOperation,
+    UnknownOperation(String),
+}
+
+impl fmt::Display for OperationParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidOperationEncoding => write!(
+                f,
+                "Failed to deserialize Operation, expected a command (e.g. Put, Get, etc) followed by a CRLF!"
+            ),
+            Self::InvalidKeyLenEncoding => write!(
+                f,
+                "Failed to deserialize Operation, expected usize for key length followed by a CRLF!"
+            ),
+            Self::InvalidKeyEncoding => write!(
+                f,
+                "Failed to deserialize Operation, expected bytes of <key_length> length followed by a CRLF!"
+            ),
+            Self::InvalidValueEncoding => write!(
+                f,
+                "Failed to deserialize Operation, expected bytes of <value_length> length followed by a CRLF!"
+            ),
+            Self::InvalidValueLenEncoding => write!(
+                f,
+                "Failed to deserialize Operation, expected usize for value length followed by a CRLF!"
+            ),
+            Self::UnknownOperation(unknown_operation) => write!(
+                f,
+                "Failed to deserialize Operation, expected one of {:?}, got: {unknown_operation}",
+                OperationKind::VARIANTS
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -320,7 +381,7 @@ mod tests {
         let mut bad_bytes: &[u8] = b"hello!\r\n".as_slice();
         let actual = Operation::from_reader(&mut bad_bytes);
         let expected: Result<Operation, OperationParseError> =
-            Err(OperationParseError::UnknownOperation);
+            Err(OperationParseError::UnknownOperation("hello!".to_owned()));
 
         assert_eq!(actual, expected);
     }
@@ -339,8 +400,9 @@ mod tests {
     fn from_reader_for_operation_bad_operator() {
         let mut byte_arry: &[u8] = b"InvalidOperation\r\n";
         let actual = Operation::from_reader(&mut byte_arry);
-        let expected: Result<Operation, OperationParseError> =
-            Err(OperationParseError::UnknownOperation);
+        let expected: Result<Operation, OperationParseError> = Err(
+            OperationParseError::UnknownOperation("InvalidOperation".to_owned()),
+        );
 
         assert_eq!(actual, expected);
     }
@@ -484,7 +546,7 @@ mod tests {
     fn from_reader_for_wire_format_empty_bytes() {
         let mut input: &[u8] = b"";
         let actual = WireFormat::from_reader(&mut input);
-        let expected = Err(WireFormatParseError::InvalidCommandEncoding);
+        let expected = Err(WireFormatParseError::InvalidTypeEncoding);
         assert_eq!(actual, expected);
     }
 
@@ -492,7 +554,15 @@ mod tests {
     fn from_reader_for_wire_format_unknown_prefix() {
         let mut input: &[u8] = b"unknown\r\n";
         let actual = WireFormat::from_reader(&mut input);
-        let expected = Err(WireFormatParseError::InvalidCommandEncoding);
+        let expected = Err(WireFormatParseError::UnknownType("unknown".to_owned()));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn from_reader_for_wire_format_unknown_type_carries_the_bad_type() {
+        let mut input: &[u8] = b"notacommand\r\n";
+        let actual = WireFormat::from_reader(&mut input);
+        let expected = Err(WireFormatParseError::UnknownType("notacommand".to_owned()));
         assert_eq!(actual, expected);
     }
 
@@ -527,8 +597,18 @@ mod tests {
     fn from_reader_for_wire_format_cmd_bad_operation() {
         let mut input: &[u8] = b"op\r\nInvalid\r\n";
         let actual = WireFormat::from_reader(&mut input);
-        let expected = Err(WireFormatParseError::OperationError(
-            OperationParseError::UnknownOperation,
+        let expected = Err(WireFormatParseError::InvalidCmdEncoding(
+            OperationParseError::UnknownOperation("Invalid".to_owned()),
+        ));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn from_reader_for_wire_format_cmd_bad_key_len() {
+        let mut input: &[u8] = b"op\r\nPut\r\nNotANumber\r\n";
+        let actual = WireFormat::from_reader(&mut input);
+        let expected = Err(WireFormatParseError::InvalidCmdEncoding(
+            OperationParseError::InvalidKeyLenEncoding,
         ));
         assert_eq!(actual, expected);
     }
