@@ -26,7 +26,7 @@ pub fn run(config: Config) -> () {
             continue;
         };
 
-        info!("Established a connection with peer {peer_socket_address}");
+        info!("Connected to peer: {peer_socket_address}");
         let mut buff_reader: BufReader<&TcpStream> = BufReader::new(&tcp_stream);
 
         let Ok(message) = WireFormat::from_reader(&mut buff_reader)

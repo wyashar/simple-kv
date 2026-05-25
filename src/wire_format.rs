@@ -18,12 +18,12 @@ impl OperationView<'_> {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Operation {
     kind: OperationKind,
 }
 
-#[derive(Debug, PartialEq, strum::VariantNames)]
+#[derive(Debug, Clone, PartialEq, strum::VariantNames)]
 #[strum(serialize_all = "PascalCase")]
 enum OperationKind {
     Put(Vec<u8>, Vec<u8>),
@@ -147,6 +147,10 @@ impl Operation {
         }
     }
 
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.into()
+    }
+
     pub fn execute(self, store: &mut KvStore) -> KvStoreResult {
         match self.kind {
             OperationKind::Put(key, value) => store.put(key, value),
@@ -156,12 +160,12 @@ impl Operation {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WireFormat {
     kind: WireFormatKind,
 }
 
-#[derive(Debug, PartialEq, strum::VariantNames)]
+#[derive(Debug, Clone, PartialEq, strum::VariantNames)]
 enum WireFormatKind {
     Cmd(Operation),
     SimpleString(String),
@@ -178,6 +182,10 @@ impl WireFormat {
         WireFormat {
             kind: WireFormatKind::SimpleString(s),
         }
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.into()
     }
 
     pub fn into_command(self) -> Option<Operation> {
@@ -739,6 +747,73 @@ mod tests {
             Ok(Operation::put(key_bytes, value_bytes));
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn operation_into_bytes_roundtrip_put() {
+        let original = Operation::put(b"MyKey".to_vec(), b"MyValue".to_vec());
+        let bytes = original.clone().into_bytes();
+        let roundtripped = Operation::from_reader(&mut &bytes[..]).expect("valid bytes");
+        assert_eq!(original, roundtripped);
+    }
+
+    #[test]
+    fn operation_into_bytes_roundtrip_get() {
+        let original = Operation::get(b"MyKey".to_vec());
+        let bytes = original.clone().into_bytes();
+        let roundtripped = Operation::from_reader(&mut &bytes[..]).expect("valid bytes");
+        assert_eq!(original, roundtripped);
+    }
+
+    #[test]
+    fn operation_into_bytes_roundtrip_del() {
+        let original = Operation::del(b"MyKey".to_vec());
+        let bytes = original.clone().into_bytes();
+        let roundtripped = Operation::from_reader(&mut &bytes[..]).expect("valid bytes");
+        assert_eq!(original, roundtripped);
+    }
+
+    #[test]
+    fn operation_into_bytes_roundtrip_put_non_utf8_value() {
+        let original = Operation::put(b"key".to_vec(), vec![0xFF, 0xFE, 0x00, 0xC3, 0x28]);
+        let bytes = original.clone().into_bytes();
+        let roundtripped = Operation::from_reader(&mut &bytes[..]).expect("valid bytes");
+        assert_eq!(original, roundtripped);
+    }
+
+    #[test]
+    fn operation_into_bytes_roundtrip_get_non_utf8_key() {
+        let original = Operation::get(vec![0xFF, 0xFE, 0x00, 0xC3, 0x28]);
+        let bytes = original.clone().into_bytes();
+        let roundtripped = Operation::from_reader(&mut &bytes[..]).expect("valid bytes");
+        assert_eq!(original, roundtripped);
+    }
+
+    #[test]
+    fn operation_into_bytes_roundtrip_del_non_utf8_key() {
+        let original = Operation::del(vec![0xFF, 0xFE, 0x00, 0xC3, 0x28]);
+        let bytes = original.clone().into_bytes();
+        let roundtripped = Operation::from_reader(&mut &bytes[..]).expect("valid bytes");
+        assert_eq!(original, roundtripped);
+    }
+
+    #[test]
+    fn wire_format_into_bytes_roundtrip_cmd_non_utf8() {
+        let original = WireFormat::cmd(Operation::put(
+            vec![0xFF, 0xFE, 0x00],
+            vec![0xC3, 0x28, 0xFF],
+        ));
+        let bytes = original.clone().into_bytes();
+        let roundtripped = WireFormat::from_reader(&mut &bytes[..]).expect("valid bytes");
+        assert_eq!(original, roundtripped);
+    }
+
+    #[test]
+    fn wire_format_into_bytes_roundtrip_sstr() {
+        let original = WireFormat::simple_string("Hello World".to_string());
+        let bytes = original.clone().into_bytes();
+        let roundtripped = WireFormat::from_reader(&mut &bytes[..]).expect("valid bytes");
+        assert_eq!(original, roundtripped);
     }
 
     #[test]
