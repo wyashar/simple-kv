@@ -1,3 +1,5 @@
+use std::fmt;
+
 pub struct Config {
     pub server_address: String,
     pub server_port: u16,
@@ -6,16 +8,30 @@ pub struct Config {
 const SERVER_ADDRESS_ENV: &str = "SERVER_ADDRESS";
 const SERVER_PORT_ENV: &str = "SERVER_PORT";
 
-#[derive(thiserror::Error, Debug)]
+#[derive(Debug)]
 pub enum ConfigError {
-    #[error("missing server address")]
     MissingServerAddress,
-    #[error("missing server port")]
     MissingServerPort,
-    #[error("invalid port: {0}")]
-    InvalidPort(#[from] std::num::ParseIntError),
-    #[error("port must be a valid u16")]
     InvalidPortFormat,
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self {
+            Self::MissingServerAddress => write!(
+                f,
+                "Failed to create new value for Config: {SERVER_ADDRESS_ENV} must be provided by env!"
+            ),
+            Self::MissingServerPort => write!(
+                f,
+                "Failed to create new value for Config: {SERVER_PORT_ENV} must be provided by env!"
+            ),
+            Self::InvalidPortFormat => write!(
+                f,
+                "Failed to create new value for Config: {SERVER_PORT_ENV} must be a valid u16!"
+            ),
+        }
+    }
 }
 
 impl Config {

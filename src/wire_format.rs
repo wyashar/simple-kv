@@ -2,6 +2,22 @@ use crate::kv_store::{KvStore, KvStoreResult};
 use std::{fmt, io::BufRead};
 use strum::VariantNames;
 
+pub enum OperationView<'a> {
+    Put { key: &'a [u8], value: &'a [u8] },
+    Get { key: &'a [u8] },
+    Del { key: &'a [u8] },
+}
+
+impl OperationView<'_> {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Put { .. } => "Put",
+            Self::Get { .. } => "Get",
+            Self::Del { .. } => "Del",
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Operation {
     kind: OperationKind,
@@ -115,7 +131,23 @@ impl Operation {
         }
     }
 
-    pub fn apply(self, store: &mut KvStore) -> KvStoreResult {
+    pub fn name(&self) -> &'static str {
+        match &self.kind {
+            OperationKind::Put(_, _) => "Put",
+            OperationKind::Get(_) => "Get",
+            OperationKind::Del(_) => "Del",
+        }
+    }
+
+    pub fn as_view(&self) -> OperationView<'_> {
+        match &self.kind {
+            OperationKind::Put(key, value) => OperationView::Put { key, value },
+            OperationKind::Get(key) => OperationView::Get { key },
+            OperationKind::Del(key) => OperationView::Del { key },
+        }
+    }
+
+    pub fn execute(self, store: &mut KvStore) -> KvStoreResult {
         match self.kind {
             OperationKind::Put(key, value) => store.put(key, value),
             OperationKind::Get(key) => store.get(&key),
@@ -154,9 +186,7 @@ impl WireFormat {
             WireFormatKind::SimpleString(_) => None,
         }
     }
-}
 
-impl WireFormat {
     pub fn from_reader<Reader: BufRead>(reader: &mut Reader) -> Result<Self, WireFormatParseError> {
         let mut first_line_bytes: Vec<u8> = Vec::new();
         reader

@@ -1,7 +1,5 @@
 use crate::config::Config;
-use crate::tcp_server::TcpServer;
 use env_logger;
-use log::error;
 
 mod config;
 mod kv_server;
@@ -13,5 +11,6 @@ fn main() {
     dotenvy::dotenv().ok();
     env_logger::init();
 
-    let config: Config = Config::from_env().unwrap_or_else(|e| panic!("{}", e));
+    let config: Config = Config::from_env().unwrap_or_else(|e| panic!("{e}"));
+    kv_server::run(config);
 }
