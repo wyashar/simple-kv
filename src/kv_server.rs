@@ -1,5 +1,5 @@
 use crate::kv_store::KvStoreResult;
-use std::io::BufReader;
+use std::io::{BufReader, BufWriter};
 use std::net::TcpStream;
 
 use crate::config::Config;
@@ -43,6 +43,7 @@ pub fn run(config: Config) -> () {
             continue;
         };
 
+        let buf_writer: BufWriter<&TcpStream> = BufWriter::new(&tcp_stream);
         let op_name = operation.name();
         match operation.execute(&mut kv_store) {
             KvStoreResult::Stored => {
