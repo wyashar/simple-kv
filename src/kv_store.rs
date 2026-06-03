@@ -24,17 +24,23 @@ struct KvEntry<K, V> {
     key: K,
     value: V,
     hash: usize,
+    psl: usize,
 }
 
 impl<K, V> KvEntry<K, V> {
-    fn new(key: K, value: V, hash: usize) -> Self {
-        Self { key, value, hash }
+    fn new(key: K, value: V, hash: usize, psl: usize) -> Self {
+        Self {
+            key,
+            value,
+            hash,
+            psl,
+        }
     }
 }
 
 impl<K: Hash + Eq, V> KvStore<K, V> {
-    fn get_bucket_index(&self, hash: usize, probe_dist: usize) -> usize {
-        (hash + probe_dist) & (self.buckets.len() - 1)
+    fn get_bucket_index(&self, hash: usize, psl: usize) -> usize {
+        (hash + psl) & (self.buckets.len() - 1)
     }
 
     fn hash_key(&self, key: &K) -> usize {
@@ -63,9 +69,9 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
     pub fn del(&mut self, key: &K) -> Option<V> {
         let hash: usize = self.hash_key(key);
 
-        let mut probe_dist: usize = 0;
+        let mut psl: usize = 0;
         loop {
-            let bucket_index: usize = self.get_bucket_index(hash, probe_dist);
+            let bucket_index: usize = self.get_bucket_index(hash, psl);
             let bucket: &Bucket<K, V> = &self.buckets[bucket_index];
 
             match bucket {
@@ -74,31 +80,29 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
                     if entry.hash == hash && entry.key == *key {
                         self.len -= 1;
                         self.tombstones_count += 1;
-                        let old =
-                            std::mem::replace(&mut self.buckets[bucket_index], Bucket::Tombstone);
 
-                        if let Occupied(e) = old {
-                            return Some(e.value);
-                        } else {
-                            unreachable!(
-                                "It is guarenteed for this partial function to be a full function!"
-                            );
+                        match std::mem::replace(&mut self.buckets[bucket_index], Bucket::Tombstone)
+                        {
+                            Occupied(e) => return Some(e.value),
+                            _ => unreachable!(
+                                "Occupied(_) is guarenteed to act as a non-partial function here!"
+                            ),
                         }
                     }
                 }
                 Tombstone => {}
             }
 
-            probe_dist = probe_dist + 1;
+            psl = psl + 1;
         }
     }
 
     pub fn get(&self, key: &K) -> Option<&V> {
         let hash: usize = self.hash_key(key);
 
-        let mut probe_dist: usize = 0;
+        let mut psl: usize = 0;
         loop {
-            let bucket_index: usize = self.get_bucket_index(hash, probe_dist);
+            let bucket_index: usize = self.get_bucket_index(hash, psl);
             let bucket: &Bucket<K, V> = &self.buckets[bucket_index];
 
             match bucket {
@@ -111,17 +115,17 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
                 Tombstone => {}
             }
 
-            probe_dist = probe_dist + 1;
+            psl = psl + 1;
         }
     }
 
     pub fn put(&mut self, key: K, value: V) -> () {
         let hash: usize = self.hash_key(&key);
 
-        let mut probe_dist: usize = 0;
+        let mut psl: usize = 0;
         let mut tombstone_index: Option<usize> = None;
         loop {
-            let bucket_index: usize = self.get_bucket_index(hash, probe_dist);
+            let bucket_index: usize = self.get_bucket_index(hash, psl);
             let bucket: &mut Bucket<K, V> = &mut self.buckets[bucket_index];
 
             match bucket {
@@ -136,24 +140,26 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
                     if tombstone_index.is_some() {
                         self.tombstones_count -= 1;
                     }
-                    self.buckets[write_index] = Bucket::Occupied(KvEntry::new(key, value, hash));
+                    self.buckets[write_index] =
+                        Bucket::Occupied(KvEntry::new(key, value, hash, psl));
                     return;
                 }
                 Occupied(entry) => {
                     if entry.hash == hash && entry.key == key {
-                        if let Some(t_index) = tombstone_index {
-                            self.buckets[t_index] =
-                                Bucket::Occupied(KvEntry::new(key, value, hash));
-                            self.buckets[bucket_index] = Bucket::Tombstone;
-                        } else {
-                            entry.value = value;
+                        match tombstone_index {
+                            Some(t_index) => {
+                                self.buckets[t_index] =
+                                    Bucket::Occupied(KvEntry::new(key, value, hash, psl));
+                                self.buckets[bucket_index] = Bucket::Tombstone;
+                            }
+                            None => entry.value = value,
                         }
                         return;
                     }
                 }
             }
 
-            probe_dist = probe_dist + 1;
+            psl = psl + 1;
         }
     }
 }
