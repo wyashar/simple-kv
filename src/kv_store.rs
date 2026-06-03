@@ -1,86 +1,39 @@
-use rustc_hash::FxBuildHasher;
 use std::hash::{BuildHasher, Hash, Hasher};
 
-const LOAD_FACTOR: f32 = 0.75;
-const STARTING_CAPACITY: usize = 16;
+use rustc_hash::FxBuildHasher;
 
-pub struct KvStore<K, V>
-where
-    K: Hash + Eq,
-    V: Clone + PartialEq,
-{
-    buckets: Box<[Option<Node<K, V>>]>,
+use crate::kv_store::Bucket::{Empty, Occupied, Tombstone};
+
+const STARTING_CAPACITY: usize = 16;
+const LOAD_FACTOR: f32 = 0.75;
+
+pub struct KvStore<K, V> {
     size: usize,
+    buckets: Box<[Bucket<K, V>]>,
     hasher: FxBuildHasher,
 }
 
-pub struct Node<K, V>
-where
-    K: Hash,
-    V: Clone + PartialEq,
-{
+enum Bucket<K, V> {
+    Empty,
+    Tombstone,
+    Occupied(KvEntry<K, V>),
+}
+
+struct KvEntry<K, V> {
     key: K,
     value: V,
     hash: usize,
-    next: Option<Box<Node<K, V>>>,
 }
 
-impl<K, V> PartialEq for Node<K, V>
-where
-    K: Hash + Eq,
-    V: Clone + PartialEq,
-{
-    fn eq(&self, other: &Self) -> bool {
-        self.key == other.key && self.value == other.value
+impl<K, V> KvEntry<K, V> {
+    fn new(key: K, value: V, hash: usize) -> Self {
+        Self { key, value, hash }
     }
 }
 
-impl<K, V> Eq for Node<K, V>
-where
-    K: Hash + Eq,
-    V: Clone + PartialEq,
-{
-}
-
-impl<K, V> Node<K, V>
-where
-    K: Hash + Eq,
-    V: Clone + PartialEq,
-{
-    pub fn new(key: K, value: V, hash: usize) -> Self {
-        Self {
-            key: key,
-            value: value,
-            hash: hash,
-            next: None,
-        }
-    }
-
-    pub fn with_next(key: K, value: V, hash: usize, next: Node<K, V>) -> Self {
-        Self {
-            key: key,
-            value: value,
-            hash: hash,
-            next: Some(Box::new(next)),
-        }
-    }
-}
-
-impl<K, V> KvStore<K, V>
-where
-    K: Hash + Eq,
-    V: Clone + PartialEq,
-{
-    pub fn new() -> Self {
-        Self {
-            buckets: Box::new([const { None }; STARTING_CAPACITY]),
-            size: 0,
-            hasher: FxBuildHasher::default(),
-        }
-    }
-
-    fn get_bucket_index(&self, hash: &usize) -> usize {
-        hash & (self.buckets.len() - 1)
+impl<K: Hash + Eq, V> KvStore<K, V> {
+    fn get_bucket_index(&self, hash: usize, probe_dist: usize) -> usize {
+        (hash + probe_dist) & (self.buckets.len() - 1)
     }
 
     fn hash_key(&self, key: &K) -> usize {
@@ -89,29 +42,37 @@ where
         hasher.finish() as usize
     }
 
-    pub fn put(&mut self, key: K, value: V) {
+    pub fn new() -> Self {
+        Self {
+            size: 0,
+            buckets: Box::new([const { Bucket::Empty }; STARTING_CAPACITY]),
+            hasher: FxBuildHasher::default(),
+        }
+    }
+
+    pub fn put(&mut self, key: K, value: V) -> () {
         let hash: usize = self.hash_key(&key);
-        let bucket_index = self.get_bucket_index(&hash);
 
-        match self.buckets[bucket_index].take() {
-            None => self.buckets[bucket_index] = Some(Node::new(key, value, hash)),
-            Some(n) => {
-                let mut prev: Option<&Node<K, V>> = None;
-                let mut curr: Option<&Node<K, V>> = Some(&n);
+        let mut probe_dist: usize = 0;
+        loop {
+            let bucket_index: usize = self.get_bucket_index(hash, probe_dist);
+            let bucket: &mut Bucket<K, V> = &mut self.buckets[bucket_index];
 
-                while curr != None {
-                    let Some(val) = curr else {
-                        continue;
-                    };
-
-                    if (val.hash == hash && val.key == key) {
-                        prev.next = val.next
+            // TODO: handle the tombstone case
+            match bucket {
+                Empty => {
+                    self.buckets[bucket_index] = Bucket::Occupied(KvEntry::new(key, value, hash));
+                    return;
+                }
+                Occupied(entry) => {
+                    if entry.hash == hash && entry.key == key {
+                        entry.value = value;
+                        return;
                     }
                 }
-
-                let entry: Node<K, V> = Node::with_next(key, value, hash, n);
-                self.buckets[bucket_index] = Some(entry);
             }
+
+            probe_dist = probe_dist + 1;
         }
     }
 }
