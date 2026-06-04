@@ -93,7 +93,7 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
                 Tombstone => {}
             }
 
-            psl = psl + 1;
+            psl += 1;
         }
     }
 
@@ -115,51 +115,64 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
                 Tombstone => {}
             }
 
-            psl = psl + 1;
+            psl += 1;
         }
     }
 
     pub fn put(&mut self, key: K, value: V) -> () {
-        let hash: usize = self.hash_key(&key);
+        let mut hash: usize = self.hash_key(&key);
 
         let mut psl: usize = 0;
-        let mut tombstone_index: Option<usize> = None;
+        let mut tombstone_idxs: Option<(usize, usize)> = None; // (tombstone_index, tombstone_psl)
         loop {
             let bucket_index: usize = self.get_bucket_index(hash, psl);
             let bucket: &mut Bucket<K, V> = &mut self.buckets[bucket_index];
-
             match bucket {
                 Tombstone => {
-                    if tombstone_index.is_none() {
-                        tombstone_index = Some(bucket_index);
+                    if tombstone_idxs.is_none() {
+                        tombstone_idxs = Some((bucket_index, psl));
                     }
                 }
                 Empty => {
                     self.len += 1;
-                    let write_index: usize = tombstone_index.unwrap_or(bucket_index);
-                    if tombstone_index.is_some() {
-                        self.tombstones_count -= 1;
+                    match tombstone_idxs {
+                        Some((t_idx, t_psl)) => {
+                            self.tombstones_count -= 1;
+                            self.buckets[t_idx] =
+                                Bucket::Occupied(KvEntry::new(key, value, hash, t_psl));
+                        }
+                        None => {
+                            self.buckets[bucket_index] =
+                                Bucket::Occupied(KvEntry::new(key, value, hash, psl))
+                        }
                     }
-                    self.buckets[write_index] =
-                        Bucket::Occupied(KvEntry::new(key, value, hash, psl));
                     return;
                 }
                 Occupied(entry) => {
                     if entry.hash == hash && entry.key == key {
-                        match tombstone_index {
-                            Some(t_index) => {
+                        match tombstone_idxs {
+                            Some((t_index, t_psl)) => {
                                 self.buckets[t_index] =
-                                    Bucket::Occupied(KvEntry::new(key, value, hash, psl));
+                                    Bucket::Occupied(KvEntry::new(key, value, hash, t_psl));
                                 self.buckets[bucket_index] = Bucket::Tombstone;
                             }
                             None => entry.value = value,
                         }
                         return;
                     }
+
+                    if entry.psl < psl {
+                        psl = entry.psl;
+                        hash = entry.hash;
+                        std::mem::swap(
+                            bucket,
+                            &mut Bucket::Occupied(KvEntry::new(key, value, hash, psl)),
+                        );
+                    }
                 }
             }
 
-            psl = psl + 1;
+            psl += 1;
         }
     }
 }
