@@ -77,6 +77,10 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
             match bucket {
                 Empty => return None,
                 Occupied(entry) => {
+                    if entry.psl < psl {
+                        return None;
+                    }
+
                     if entry.hash == hash && entry.key == *key {
                         self.len -= 1;
                         self.tombstones_count += 1;
@@ -85,7 +89,7 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
                         {
                             Occupied(e) => return Some(e.value),
                             _ => unreachable!(
-                                "Occupied(_) is guarenteed to act as a non-partial function here!"
+                                "Occupied(_) is guaranteed to act as a non-partial function here!"
                             ),
                         }
                     }
@@ -108,6 +112,10 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
             match bucket {
                 Empty => return None,
                 Occupied(entry) => {
+                    if entry.psl < psl {
+                        return None;
+                    }
+
                     if entry.hash == hash && entry.key == *key {
                         return Some(&entry.value);
                     }
@@ -119,7 +127,9 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
         }
     }
 
-    pub fn put(&mut self, key: K, value: V) -> () {
+    pub fn put(&mut self, key: K, value: V) {
+        let mut key = key;
+        let mut value = value;
         let mut hash: usize = self.hash_key(&key);
 
         let mut psl: usize = 0;
@@ -142,8 +152,7 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
                                 Bucket::Occupied(KvEntry::new(key, value, hash, t_psl));
                         }
                         None => {
-                            self.buckets[bucket_index] =
-                                Bucket::Occupied(KvEntry::new(key, value, hash, psl))
+                            *bucket = Bucket::Occupied(KvEntry::new(key, value, hash, psl));
                         }
                     }
                     return;
@@ -162,12 +171,30 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
                     }
 
                     if entry.psl < psl {
-                        psl = entry.psl;
-                        hash = entry.hash;
-                        std::mem::swap(
+                        if let Some((t_idx, t_psl)) = tombstone_idxs {
+                            self.len += 1;
+                            self.tombstones_count -= 1;
+                            self.buckets[t_idx] =
+                                Bucket::Occupied(KvEntry::new(key, value, hash, t_psl));
+                            return;
+                        }
+
+                        let stolen_bucket: Bucket<K, V> = std::mem::replace(
                             bucket,
-                            &mut Bucket::Occupied(KvEntry::new(key, value, hash, psl)),
+                            Bucket::Occupied(KvEntry::new(key, value, hash, psl)),
                         );
+
+                        match stolen_bucket {
+                            Occupied(e) => {
+                                key = e.key;
+                                value = e.value;
+                                hash = e.hash;
+                                psl = e.psl;
+                            }
+                            _ => unreachable!(
+                                "Occupied(_) is guaranteed to act as a non-partial function here!"
+                            ),
+                        }
                     }
                 }
             }
