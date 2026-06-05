@@ -103,6 +103,13 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
         }
     }
 
+    fn fill_tombstone(&mut self, t_idx: usize, t_psl: usize, mut incoming: KvEntry<K, V>) {
+        self.len += 1;
+        self.tombstones_count -= 1;
+        incoming.psl = t_psl;
+        self.buckets[t_idx] = Occupied(incoming);
+    }
+
     pub fn del(&mut self, key: &K) -> Option<V> {
         let hash: usize = self.hash_key(key);
 
@@ -111,16 +118,20 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
             let bucket_index: usize = self.get_bucket_index(hash, psl);
 
             match &self.buckets[bucket_index] {
-                Occupied(e) if e.psl < psl => return None,
-                Occupied(e) if e.hash == hash && e.key == *key => {
-                    self.len -= 1;
-                    self.tombstones_count += 1;
-                    let tombstoned_bucket: Bucket<K, V> =
-                        std::mem::replace(&mut self.buckets[bucket_index], Bucket::Tombstone);
+                Occupied(e) => {
+                    if e.psl < psl {
+                        return None;
+                    }
+                    if e.hash == hash && e.key == *key {
+                        self.len -= 1;
+                        self.tombstones_count += 1;
+                        let tombstoned_bucket: Bucket<K, V> =
+                            std::mem::replace(&mut self.buckets[bucket_index], Tombstone);
 
-                    match tombstoned_bucket {
-                        Occupied(entry) => return Some(entry.value),
-                        _ => unreachable!("Occupied(_) is a non-partial function here"),
+                        match tombstoned_bucket {
+                            Occupied(entry) => return Some(entry.value),
+                            _ => unreachable!("Occupied(_) is a non-partial function here"),
+                        }
                     }
                 }
                 Empty => return None,
@@ -139,8 +150,14 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
             let bucket_index: usize = self.get_bucket_index(hash, psl);
 
             match &self.buckets[bucket_index] {
-                Occupied(e) if e.hash == hash && e.key == *key => return Some(&e.value),
-                Occupied(e) if e.psl < psl => return None,
+                Occupied(e) => {
+                    if e.hash == hash && e.key == *key {
+                        return Some(&e.value);
+                    }
+                    if e.psl < psl {
+                        return None;
+                    }
+                }
                 Empty => return None,
                 _ => {}
             }
@@ -152,7 +169,7 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
     pub fn put(&mut self, key: K, value: V) {
         let hash: usize = self.hash_key(&key);
         let mut incoming: KvEntry<K, V> = KvEntry::new(key, value, hash, 0);
-        let mut tombstone_idxs: Option<(usize, usize)> = None; // (index, psl)
+        let mut tombstone_slot: Option<(usize, usize)> = None; // (index, psl)
 
         if self.should_resize() {
             self.resize();
@@ -170,13 +187,10 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
                     }
                     // robin hood swap
                     if e.psl < incoming.psl {
-                        match tombstone_idxs {
+                        match tombstone_slot {
                             // cancel the robin hood swap and fill the earlier hole instead
                             Some((t_idx, t_psl)) => {
-                                self.tombstones_count -= 1;
-                                self.len += 1;
-                                incoming.psl = t_psl;
-                                self.buckets[t_idx] = Bucket::Occupied(incoming);
+                                self.fill_tombstone(t_idx, t_psl, incoming);
                                 return;
                             }
                             None => std::mem::swap(e, &mut incoming),
@@ -185,24 +199,20 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
                 }
                 // if you see an empty, that means you already probed past possible key collison idxs
                 Empty => {
-                    self.len += 1;
-                    match tombstone_idxs {
+                    match tombstone_slot {
                         // consume tombstone if seen
-                        Some((t_idx, t_psl)) => {
-                            self.tombstones_count -= 1;
-                            incoming.psl = t_psl;
-                            self.buckets[t_idx] = Bucket::Occupied(incoming);
-                        }
+                        Some((t_idx, t_psl)) => self.fill_tombstone(t_idx, t_psl, incoming),
                         None => {
-                            self.buckets[bucket_index] = Bucket::Occupied(incoming);
+                            self.len += 1;
+                            self.buckets[bucket_index] = Occupied(incoming);
                         }
                     }
                     return;
                 }
                 // just because we see a tombstone doesn't mean we can swap right away since we may have a key collision later on
                 Tombstone => {
-                    if tombstone_idxs.is_none() {
-                        tombstone_idxs = Some((bucket_index, incoming.psl));
+                    if tombstone_slot.is_none() {
+                        tombstone_slot = Some((bucket_index, incoming.psl));
                     }
                 }
             }
