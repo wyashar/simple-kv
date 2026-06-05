@@ -66,6 +66,43 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
         self.len == 0
     }
 
+    fn should_resize(&self) -> bool {
+        ((self.len + self.tombstones_count) as f32 / self.buckets.len() as f32) >= LOAD_FACTOR
+    }
+
+    fn resize(&mut self) {
+        self.tombstones_count = 0;
+        let new_buckets: Box<[Bucket<K, V>]> =
+            (0..self.buckets.len() * 2).map(|_| Bucket::Empty).collect();
+        let old_buckets: Box<[Bucket<K, V>]> = std::mem::replace(&mut self.buckets, new_buckets);
+
+        for bucket in old_buckets {
+            if let Occupied(entry) = bucket {
+                self.insert_entry(entry);
+            }
+        }
+    }
+
+    fn insert_entry(&mut self, mut entry: KvEntry<K, V>) {
+        entry.psl = 0;
+
+        loop {
+            let bucket_index: usize = self.get_bucket_index(entry.hash, entry.psl);
+            match &mut self.buckets[bucket_index] {
+                Occupied(e) if e.psl < entry.psl => {
+                    std::mem::swap(e, &mut entry);
+                }
+                Empty => {
+                    self.buckets[bucket_index] = Occupied(entry);
+                    return;
+                }
+                _ => {}
+            }
+
+            entry.psl += 1;
+        }
+    }
+
     pub fn del(&mut self, key: &K) -> Option<V> {
         let hash: usize = self.hash_key(key);
 
@@ -116,6 +153,10 @@ impl<K: Hash + Eq, V> KvStore<K, V> {
         let hash: usize = self.hash_key(&key);
         let mut incoming: KvEntry<K, V> = KvEntry::new(key, value, hash, 0);
         let mut tombstone_idxs: Option<(usize, usize)> = None; // (index, psl)
+
+        if self.should_resize() {
+            self.resize();
+        }
 
         loop {
             let bucket_index: usize = self.get_bucket_index(incoming.hash, incoming.psl);
