@@ -12,4 +12,5 @@ fn main() {
     env_logger::init();
 
     let config: Config = Config::from_env().unwrap_or_else(|e| panic!("{e}"));
+    kv_server::run(config);
 }

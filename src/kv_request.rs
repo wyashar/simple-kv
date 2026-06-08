@@ -2,17 +2,13 @@ use std::{fmt, io::BufRead};
 use strum::VariantNames;
 
 pub struct KvRequest {
-    command: KvCommand,
+    pub command: KvCommand,
     // TODO: add some sort of top-level metadata here, or collapse into just KvCommand
     // fields could be like request id, trace context, etc etc
 }
 
-enum KvParseError {
-    InvalidKvCommandFormat(KvCommandParseError),
-}
-
 #[derive(Debug, PartialEq)]
-pub enum KvCommandParseError {
+pub enum KvRequestError {
     InvalidOperationEncoding,
     InvalidKeyLenEncoding,
     InvalidKeyEncoding,
@@ -30,56 +26,55 @@ pub enum KvCommand {
 }
 
 impl KvRequest {
-    pub fn from_reader<T: BufRead>(reader: &mut T) -> Result<KvRequest, KvParseError> {
+    pub fn from_reader<T: BufRead>(reader: &mut T) -> Result<KvRequest, KvRequestError> {
         Ok(Self {
-            command: KvCommand::from_reader(reader)
-                .map_err(|e| KvParseError::InvalidKvCommandFormat(e))?,
+            command: KvCommand::from_reader(reader)?,
         })
     }
 }
 
 impl KvCommand {
-    pub fn from_reader<T: BufRead>(reader: &mut T) -> Result<KvCommand, KvCommandParseError> {
+    pub fn from_reader<T: BufRead>(reader: &mut T) -> Result<KvCommand, KvRequestError> {
         let mut command_bytes: Vec<u8> = Vec::new();
         reader
             .read_until(b'\n', &mut command_bytes)
-            .map_err(|_| KvCommandParseError::InvalidOperationEncoding)?;
+            .map_err(|_| KvRequestError::InvalidOperationEncoding)?;
 
         let command_bytes_trimmed = command_bytes
             .strip_suffix(b"\r\n")
-            .ok_or(KvCommandParseError::InvalidOperationEncoding)?;
+            .ok_or(KvRequestError::InvalidOperationEncoding)?;
         let command_str: &str = std::str::from_utf8(command_bytes_trimmed)
-            .map_err(|_| KvCommandParseError::InvalidOperationEncoding)
+            .map_err(|_| KvRequestError::InvalidOperationEncoding)
             .and_then(|s| match s {
                 "Put" | "Get" | "Del" => Ok(s),
-                _ => Err(KvCommandParseError::UnknownOperation(s.to_owned())),
+                _ => Err(KvRequestError::UnknownOperation(s.to_owned())),
             })?;
 
         let mut key_length_bytes: Vec<u8> = Vec::new();
         reader
             .read_until(b'\n', &mut key_length_bytes)
-            .map_err(|_| KvCommandParseError::InvalidKeyLenEncoding)?;
+            .map_err(|_| KvRequestError::InvalidKeyLenEncoding)?;
 
         let key_length_bytes_trimmed = key_length_bytes
             .strip_suffix(b"\r\n")
-            .ok_or(KvCommandParseError::InvalidKeyLenEncoding)?;
+            .ok_or(KvRequestError::InvalidKeyLenEncoding)?;
         let key_length: usize = std::str::from_utf8(key_length_bytes_trimmed)
-            .map_err(|_| KvCommandParseError::InvalidKeyLenEncoding)?
+            .map_err(|_| KvRequestError::InvalidKeyLenEncoding)?
             .parse()
-            .map_err(|_| KvCommandParseError::InvalidKeyLenEncoding)?;
+            .map_err(|_| KvRequestError::InvalidKeyLenEncoding)?;
 
         let mut key_bytes: Vec<u8> = vec![0u8; key_length];
 
         reader
             .read_exact(&mut key_bytes)
-            .map_err(|_| KvCommandParseError::InvalidKeyEncoding)?;
+            .map_err(|_| KvRequestError::InvalidKeyEncoding)?;
 
         let mut carriage_return: [u8; 2] = [0; 2];
         reader
             .read_exact(&mut carriage_return)
-            .map_err(|_| KvCommandParseError::InvalidKeyEncoding)?;
+            .map_err(|_| KvRequestError::InvalidKeyEncoding)?;
         if &carriage_return != b"\r\n" {
-            return Err(KvCommandParseError::InvalidKeyEncoding);
+            return Err(KvRequestError::InvalidKeyEncoding);
         }
 
         match command_str {
@@ -89,27 +84,27 @@ impl KvCommand {
                 let mut value_length_bytes: Vec<u8> = Vec::new();
                 reader
                     .read_until(b'\n', &mut value_length_bytes)
-                    .map_err(|_| KvCommandParseError::InvalidValueLenEncoding)?;
+                    .map_err(|_| KvRequestError::InvalidValueLenEncoding)?;
 
                 let value_length_bytes_trimmed = value_length_bytes
                     .strip_suffix(b"\r\n")
-                    .ok_or(KvCommandParseError::InvalidValueLenEncoding)?;
+                    .ok_or(KvRequestError::InvalidValueLenEncoding)?;
                 let value_length: usize = std::str::from_utf8(value_length_bytes_trimmed)
-                    .map_err(|_| KvCommandParseError::InvalidValueLenEncoding)?
+                    .map_err(|_| KvRequestError::InvalidValueLenEncoding)?
                     .parse()
-                    .map_err(|_| KvCommandParseError::InvalidValueLenEncoding)?;
+                    .map_err(|_| KvRequestError::InvalidValueLenEncoding)?;
 
                 let mut value_bytes: Vec<u8> = vec![0u8; value_length];
                 reader
                     .read_exact(&mut value_bytes)
-                    .map_err(|_| KvCommandParseError::InvalidValueEncoding)?;
+                    .map_err(|_| KvRequestError::InvalidValueEncoding)?;
 
                 let mut value_carriage_return: [u8; 2] = [0; 2];
                 reader
                     .read_exact(&mut value_carriage_return)
-                    .map_err(|_| KvCommandParseError::InvalidValueEncoding)?;
+                    .map_err(|_| KvRequestError::InvalidValueEncoding)?;
                 if &value_carriage_return != b"\r\n" {
-                    return Err(KvCommandParseError::InvalidValueEncoding);
+                    return Err(KvRequestError::InvalidValueEncoding);
                 }
 
                 Ok(KvCommand::Put(key_bytes, value_bytes))
@@ -160,34 +155,27 @@ impl From<KvCommand> for Vec<u8> {
 }
 
 impl fmt::Display for KvCommand {
-    // KvCommand => String => KvCommand is lossy for non-UTF8 keys/values
+    // Lossy: non-UTF8 bytes are replaced with U+FFFD. Do not use for round-tripping (KvCommand -> Display -> KvCommand).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Put(key, value) => {
                 let key_lossy = String::from_utf8_lossy(key);
                 let value_lossy = String::from_utf8_lossy(value);
-                write!(
-                    f,
-                    "Put\r\n{}\r\n{}\r\n{}\r\n{}\r\n",
-                    key_lossy.len(),
-                    key_lossy,
-                    value_lossy.len(),
-                    value_lossy
-                )
+                write!(f, "Put key={key_lossy} value={value_lossy}")
             }
             Self::Get(key) => {
                 let key_lossy = String::from_utf8_lossy(key);
-                write!(f, "Get\r\n{}\r\n{}\r\n", key_lossy.len(), key_lossy)
+                write!(f, "Get key={key_lossy}")
             }
             Self::Del(key) => {
                 let key_lossy = String::from_utf8_lossy(key);
-                write!(f, "Del\r\n{}\r\n{}\r\n", key_lossy.len(), key_lossy)
+                write!(f, "Del key={key_lossy}")
             }
         }
     }
 }
 
-impl fmt::Display for KvCommandParseError {
+impl fmt::Display for KvRequestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidOperationEncoding => write!(
@@ -227,8 +215,8 @@ mod tests {
     fn from_reader_for_kv_command_bad_operation_bytes() {
         let mut bad_bytes: &[u8] = b"hello!\r\n".as_slice();
         let actual = KvCommand::from_reader(&mut bad_bytes);
-        let expected: Result<KvCommand, KvCommandParseError> =
-            Err(KvCommandParseError::UnknownOperation("hello!".to_owned()));
+        let expected: Result<KvCommand, KvRequestError> =
+            Err(KvRequestError::UnknownOperation("hello!".to_owned()));
         assert_eq!(actual, expected);
     }
 
@@ -236,8 +224,8 @@ mod tests {
     fn from_reader_for_kv_command_empty_byte_arr() {
         let mut empty_byte_arr: &[u8] = b"".as_slice();
         let actual = KvCommand::from_reader(&mut empty_byte_arr);
-        let expected: Result<KvCommand, KvCommandParseError> =
-            Err(KvCommandParseError::InvalidOperationEncoding);
+        let expected: Result<KvCommand, KvRequestError> =
+            Err(KvRequestError::InvalidOperationEncoding);
         assert_eq!(actual, expected);
     }
 
@@ -245,9 +233,9 @@ mod tests {
     fn from_reader_for_kv_command_bad_operator() {
         let mut byte_arr: &[u8] = b"InvalidOperation\r\n";
         let actual = KvCommand::from_reader(&mut byte_arr);
-        let expected: Result<KvCommand, KvCommandParseError> = Err(
-            KvCommandParseError::UnknownOperation("InvalidOperation".to_owned()),
-        );
+        let expected: Result<KvCommand, KvRequestError> = Err(KvRequestError::UnknownOperation(
+            "InvalidOperation".to_owned(),
+        ));
         assert_eq!(actual, expected);
     }
 
@@ -255,8 +243,8 @@ mod tests {
     fn from_reader_for_kv_command_bad_key_len() {
         let mut byte_arr: &[u8] = b"Put\r\nHello\r\n";
         let actual = KvCommand::from_reader(&mut byte_arr);
-        let expected: Result<KvCommand, KvCommandParseError> =
-            Err(KvCommandParseError::InvalidKeyLenEncoding);
+        let expected: Result<KvCommand, KvRequestError> =
+            Err(KvRequestError::InvalidKeyLenEncoding);
         assert_eq!(actual, expected);
     }
 
@@ -264,8 +252,7 @@ mod tests {
     fn from_reader_for_kv_command_mismatch_key_len() {
         let mut byte_arr: &[u8] = b"Get\r\n5\r\nNotFive\r\n";
         let actual = KvCommand::from_reader(&mut byte_arr);
-        let expected: Result<KvCommand, KvCommandParseError> =
-            Err(KvCommandParseError::InvalidKeyEncoding);
+        let expected: Result<KvCommand, KvRequestError> = Err(KvRequestError::InvalidKeyEncoding);
         assert_eq!(actual, expected);
     }
 
@@ -273,8 +260,8 @@ mod tests {
     fn from_reader_for_kv_command_bad_value_len_encoding() {
         let mut byte_arr: &[u8] = b"Put\r\n5\r\n12345\r\nInvalidLen";
         let actual = KvCommand::from_reader(&mut byte_arr);
-        let expected: Result<KvCommand, KvCommandParseError> =
-            Err(KvCommandParseError::InvalidValueLenEncoding);
+        let expected: Result<KvCommand, KvRequestError> =
+            Err(KvRequestError::InvalidValueLenEncoding);
         assert_eq!(actual, expected);
     }
 
@@ -282,8 +269,7 @@ mod tests {
     fn from_reader_for_kv_command_value_len_mismatch() {
         let mut byte_arr: &[u8] = b"Put\r\n5\r\n12345\r\n6\r\nSeven";
         let actual = KvCommand::from_reader(&mut byte_arr);
-        let expected: Result<KvCommand, KvCommandParseError> =
-            Err(KvCommandParseError::InvalidValueEncoding);
+        let expected: Result<KvCommand, KvRequestError> = Err(KvRequestError::InvalidValueEncoding);
         assert_eq!(actual, expected);
     }
 
@@ -291,7 +277,7 @@ mod tests {
     fn from_reader_for_kv_command_put_valid() {
         let mut byte_arr: &[u8] = b"Put\r\n6\r\nKey123\r\n7\r\nValue12\r\n";
         let actual = KvCommand::from_reader(&mut byte_arr);
-        let expected: Result<KvCommand, KvCommandParseError> =
+        let expected: Result<KvCommand, KvRequestError> =
             Ok(KvCommand::Put(b"Key123".to_vec(), b"Value12".to_vec()));
         assert_eq!(actual, expected);
     }
@@ -300,7 +286,7 @@ mod tests {
     fn from_reader_for_kv_command_get_valid() {
         let mut byte_arr: &[u8] = b"Get\r\n17\r\nDrakeIsABadArtist\r\n";
         let actual = KvCommand::from_reader(&mut byte_arr);
-        let expected: Result<KvCommand, KvCommandParseError> =
+        let expected: Result<KvCommand, KvRequestError> =
             Ok(KvCommand::Get(b"DrakeIsABadArtist".to_vec()));
         assert_eq!(actual, expected);
     }
@@ -309,7 +295,7 @@ mod tests {
     fn from_reader_for_kv_command_del_valid() {
         let mut byte_arr: &[u8] = b"Del\r\n4\r\nTree\r\n";
         let actual = KvCommand::from_reader(&mut byte_arr);
-        let expected: Result<KvCommand, KvCommandParseError> = Ok(KvCommand::Del(b"Tree".to_vec()));
+        let expected: Result<KvCommand, KvRequestError> = Ok(KvCommand::Del(b"Tree".to_vec()));
         assert_eq!(actual, expected);
     }
 
@@ -321,7 +307,7 @@ mod tests {
 
         let key_bytes: Vec<u8> = b"MyKey".to_vec();
         let value_bytes: Vec<u8> = b"\xf0\x9d\x95\xb3\xf0\x9d\x96\x8a\xf0\x9d\x96\x91\xf0\x9d\x96\x91\xf0\x9d\x96\x94 W\xc3\xb6rld! \xc3\xb1o\xc3\xb1o \xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e \xe4\xb8\xad\xe6\x96\x87 \xed\x95\x9c\xea\xb5\xad\xec\x96\xb4 \xd8\xa7\xd9\x84\xd8\xb9\xd8\xb1\xd8\xa8\xd9\x8a\xd8\xa9 \xd7\xa2\xd7\x91\xd7\xa8\xd7\x99\xd7\xaa \xe2\x84\x83 \xe2\x84\xa2 \xc2\xa9 \xc2\xae \xe2\x82\xac \xc2\xa3 \xc2\xa5 \xe2\x9c\x93 \xe2\x86\x90 \xe2\x86\x91 \xe2\x86\x92 \xe2\x86\x93 \xe2\x99\xa0 \xe2\x99\xa3 \xe2\x99\xa5 \xe2\x99\xa6".to_vec();
-        let expected: Result<KvCommand, KvCommandParseError> =
+        let expected: Result<KvCommand, KvRequestError> =
             Ok(KvCommand::Put(key_bytes, value_bytes));
         assert_eq!(actual, expected);
     }
@@ -333,7 +319,7 @@ mod tests {
         let actual = KvCommand::from_reader(&mut byte_arr);
 
         let key_bytes: Vec<u8> = b"\x5a\xcc\xb8\xcc\xa1\xcc\xa2\xcc\x9b\xcc\x9b\xcc\xba\xcc\x99\xcd\x94\xcc\xae\xcd\x8d\xcc\xba\xcc\x98\xcc\xa3\xcc\xba\xcc\x96\xcd\x9a\xcc\xac\xcc\x96\xcd\x99\xcd\x8d\xcc\xa3\xcc\x98\xcc\xa4\xcc\x9f\xcc\xaa\xcc\xa6\xcc\xac\xcd\x95\xcc\x96\xcc\xa9\xcc\xa0\xcd\x95\xcd\x96\xcc\xa4\xcc\x9f\xcc\xb1\xcc\x99\xcc\xbc\xcc\xb3\xcd\x99\xcc\xac\xcc\xa6\xcc\xb3\xcd\x89\xcc\xa6\xcc\xbb\xcc\x99\xcc\xa5\xcc\x97\xcc\x98\xcd\x87\xcd\x8d\xcc\xa4\xcc\xab\xcc\xab\xcd\x8e\xcc\xb1\xcc\xb0\xcd\x88\xcc\xba\xcc\x9c\xcc\xa4\xcd\x94\xcc\x80\xcd\x90\xcd\x8c\xcc\x80\xcd\x82\xcd\x97\xcc\x88\xcc\x81\xcc\x8c\xcc\x85\xcc\x8a\xcd\x91\xcc\x8b\xcc\x92\xcd\x92\xcd\x8a\xcc\x80\xcc\x93\xcc\x8f\xcd\x8a\xcd\x8c\xcc\x8e\xcc\x88\xcc\x81\xcc\x80\xcc\x88\xcc\x81\xcd\x98\xcd\x98\xcd\x9c\xcd\xa0\xcd\x9d\xcd\xa0\xcd\x9d\xcd\x85\xcd\x85\xc4\x85\xcc\xb7\xcc\xa7\xcc\xa7\xcc\xa2\xcc\x9b\xcc\x9b\xcc\x9b\xcc\xb9\xcc\x9f\xcd\x8e\xcd\x89\xcc\x9d\xcc\xa9\xcc\xac\xcd\x9a\xcd\x96\xcc\x9d\xcc\xa9\xcc\xb1\xcc\xa9\xcd\x95\xcd\x94\xcc\x96\xcd\x87\xcc\x98\xcd\x87\xcc\x97\xcc\xaf\xcc\x99\xcc\xa3\xcd\x99\xcc\xae\xcc\x99\xcc\x97\xcc\xb9\xcc\xba\xcd\x95\xcc\xb1\xcc\xb0\xcc\xb1\xcc\xb2\xcc\xac\xcc\x9e\xcc\xa4\xcc\xb3\xcc\xb9\xcd\x8d\xcc\x9d\xcd\x95\xcd\x91\xcd\x92\xcc\x92\xcc\x90\xcc\x93\xcc\x90\xcc\x83\xcc\x83\xcc\xbd\xcc\x8f\xcc\xbe\xcc\x86\xcc\x8b\xcd\x8c\xcd\x8c\xcc\x92\xcc\x81\xcc\x8b\xcc\x85\xcc\x81\xcc\x8f\xcd\x92\xcd\x97\xcc\x8e\xcc\x92\xcc\x94\xcc\x91\xcc\x80\xcd\x91\xcc\xbf\xcc\x84\xcd\x91\xcd\x91\xcc\xbf\xcc\x88\xcc\x81\xcd\x8b\xcc\x95\xcc\x95\xcd\x9c\xcd\xa0\xcd\xa0\xcd\x85\x6c\xcc\xb4\xcd\x87\xcc\x9c\xcc\xa3\xcc\xac\xcc\x9d\xcc\xae\xcc\xad\xcc\x9f\xcd\x87\xcd\x9a\xcc\x96\xcd\x88\xcd\x8e\xcd\x9a\xcd\x95\xcd\x94\xcd\x95\xcd\x9a\xcc\xb9\xcc\xba\xcc\xb2\xcc\x99\xcc\xba\xcc\xb9\xcd\x82\xcd\x8c\xcc\x93\xcc\x82\xcc\x80\xcc\xbe\xcc\x85\xcc\x80\xcc\x89\xcc\x92\xcc\x83\xcc\x91\xcc\x8b\xcc\x85\xcd\x98\xcc\x95\xcd\x9c\xcd\x9d\x67\xcc\xb7\xcd\x89\xcc\xb2\xcc\x99\xcc\xa5\xcc\x9c\xcc\x9f\xcd\x94\xcd\x93\xcc\xb0\xcc\xaf\xcd\x87\xcc\xae\xcd\x8e\xcd\x93\xcc\x88\xcd\x9b\xcc\x92\xcc\x8a\xcd\x90\xcd\x9b\xcc\x83\xcc\x8a\xcc\x86\xcc\x82\xcc\x8e\xcc\x88\xcc\x81\xcd\x8c\xcd\x86\xcc\x80\xcd\x8a\xcc\x8c\xcc\x83\xcc\x8d\xcc\x83\xcc\xbf\xcd\x9d\xcd\x9d\xcd\x85\x6f\xcc\xb7\xcc\xa7\xcc\xa4\xcc\xa4\xcc\xae\xcc\x9f\xcc\xae\xcc\xbb\xcc\x9f\xcc\xaa\xcc\xb1\xcc\xac\xcd\x8e\xcc\x9f\xcc\x99\xcc\x9d\xcd\x94\xcd\x99\xcc\xb2\xcc\x8e\xcc\x92\xcc\x85\xcc\x94\xcc\x89\xcd\x97\xcc\x88\xcc\x81\xcd\x9b\xcd\x8a\xcc\x88\xcd\x86\xcc\x80\xcc\x88\xcc\x81\xcd\x8a\xcd\x91\xcc\x8e\xcc\x90\xcc\x8c\xcc\x92\xcd\x86\xcd\x8a\xcc\x95\xcc\x95\xcc\x9a".to_vec();
-        let expected: Result<KvCommand, KvCommandParseError> = Ok(KvCommand::Del(key_bytes));
+        let expected: Result<KvCommand, KvRequestError> = Ok(KvCommand::Del(key_bytes));
         assert_eq!(actual, expected);
     }
 
@@ -341,7 +327,7 @@ mod tests {
     fn put_to_string_works() {
         let cmd = KvCommand::Put(b"MyKey".to_vec(), b"MyValue".to_vec());
         let actual = cmd.to_string();
-        let expected = "Put\r\n5\r\nMyKey\r\n7\r\nMyValue\r\n";
+        let expected = "Put key=MyKey value=MyValue";
         assert_eq!(actual, expected);
     }
 
@@ -349,7 +335,7 @@ mod tests {
     fn get_to_string_works() {
         let cmd = KvCommand::Get(b"12345".to_vec());
         let actual = cmd.to_string();
-        let expected = "Get\r\n5\r\n12345\r\n";
+        let expected = "Get key=12345";
         assert_eq!(actual, expected);
     }
 
@@ -357,7 +343,7 @@ mod tests {
     fn del_to_string_works() {
         let cmd = KvCommand::Del(b"DeleteMyDataNow.Com".to_vec());
         let actual = cmd.to_string();
-        let expected = "Del\r\n19\r\nDeleteMyDataNow.Com\r\n";
+        let expected = "Del key=DeleteMyDataNow.Com";
         assert_eq!(actual, expected);
     }
 
@@ -365,7 +351,7 @@ mod tests {
     fn from_reader_for_kv_command_get_key_contains_crlf() {
         let mut wire_bytes: &[u8] = b"Get\r\n8\r\nfoo\r\nbar\r\n";
         let actual = KvCommand::from_reader(&mut wire_bytes);
-        let expected: Result<KvCommand, KvCommandParseError> =
+        let expected: Result<KvCommand, KvRequestError> =
             Ok(KvCommand::Get(b"foo\r\nbar".to_vec()));
         assert_eq!(actual, expected);
     }
@@ -374,7 +360,7 @@ mod tests {
     fn from_reader_for_kv_command_put_value_contains_crlf() {
         let mut wire_bytes: &[u8] = b"Put\r\n1\r\nk\r\n4\r\nv\r\nw\r\n";
         let actual = KvCommand::from_reader(&mut wire_bytes);
-        let expected: Result<KvCommand, KvCommandParseError> =
+        let expected: Result<KvCommand, KvRequestError> =
             Ok(KvCommand::Put(b"k".to_vec(), b"v\r\nw".to_vec()));
         assert_eq!(actual, expected);
     }
@@ -425,15 +411,5 @@ mod tests {
         let bytes = original.clone().into_bytes();
         let roundtripped = KvCommand::from_reader(&mut &bytes[..]).expect("valid bytes");
         assert_eq!(original, roundtripped);
-    }
-
-    #[test]
-    fn kv_command_to_string_back_to_kv_command_is_lossy_for_non_utf8_bytes() {
-        let original = KvCommand::Get(vec![0xFF]);
-        let bytes = original.to_string().into_bytes();
-        let mut reader: &[u8] = &bytes;
-        let roundtripped = KvCommand::from_reader(&mut reader)
-            .expect("parser succeeds but produces corrupted bytes");
-        assert_ne!(original, roundtripped);
     }
 }
