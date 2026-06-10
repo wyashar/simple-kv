@@ -5,7 +5,11 @@ HOST=127.0.0.1
 PORT=8080
 
 send() {
-    printf "$1" | nc -q1 "$HOST" "$PORT"
+    # -w1 (idle/read timeout) is supported by GNU netcat, OpenBSD nc, and
+    # macOS BSD nc. The server closes the connection after each request, so nc
+    # exits on that close; -w1 is just a safety net. (BSD/GNU's -q/-N are not
+    # portable, so we avoid them.)
+    printf '%b' "$1" | nc -w1 "$HOST" "$PORT"
 }
 
 echo "--- Put key=hello value=world ---"

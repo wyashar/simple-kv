@@ -1,4 +1,8 @@
-use std::{fmt, io::BufRead, num::ParseIntError};
+use std::{
+    fmt,
+    io::{BufRead, Read},
+    num::ParseIntError,
+};
 
 use strum::VariantNames;
 
@@ -7,6 +11,9 @@ pub struct KvRequest {
     // TODO: add some sort of top-level metadata here, or collapse into just KvCommand
     // fields could be like request id, trace context, etc etc
 }
+
+const MAX_KEY_LEN: usize = 64 * 1024;
+const MAX_VALUE_LEN: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum KvRequestError {
@@ -20,6 +27,12 @@ pub enum KvRequestError {
     IoError(#[from] std::io::Error),
     #[error("keys and values should be valid usizes")]
     NonIntLength(#[from] ParseIntError),
+    #[error("key length {0} exceeds maximum of {max}", max = MAX_KEY_LEN)]
+    KeyTooLarge(usize),
+    #[error("value length {0} exceeds maximum of {max}", max = MAX_VALUE_LEN)]
+    ValueTooLarge(usize),
+    #[error("request ended before the full payload arrived")]
+    Truncated,
 }
 
 #[derive(Debug, Clone, PartialEq, strum::VariantNames)]
@@ -62,9 +75,18 @@ impl KvCommand {
 
         let key_length: usize = std::str::from_utf8(key_length_bytes_trimmed)?.parse()?;
 
-        let mut key_bytes: Vec<u8> = vec![0u8; key_length];
+        if key_length > MAX_KEY_LEN {
+            return Err(KvRequestError::KeyTooLarge(key_length));
+        }
 
-        reader.read_exact(&mut key_bytes)?;
+        let mut key_bytes: Vec<u8> = Vec::new();
+        let read = reader
+            .by_ref()
+            .take(key_length as u64)
+            .read_to_end(&mut key_bytes)?;
+        if read != key_length {
+            return Err(KvRequestError::Truncated);
+        }
 
         let mut carriage_return: [u8; 2] = [0; 2];
         reader.read_exact(&mut carriage_return)?;
@@ -86,13 +108,23 @@ impl KvCommand {
                 let value_length: usize =
                     std::str::from_utf8(value_length_bytes_trimmed)?.parse()?;
 
-                let mut value_bytes: Vec<u8> = vec![0u8; value_length];
-                reader.read_exact(&mut value_bytes)?;
+                if value_length > MAX_VALUE_LEN {
+                    return Err(KvRequestError::ValueTooLarge(value_length));
+                }
 
-                let mut value_carriage_return: [u8; 2] = [0; 2];
-                reader.read_exact(&mut value_carriage_return)?;
+                let mut value_bytes: Vec<u8> = Vec::new();
+                let read = reader
+                    .by_ref()
+                    .take(value_length as u64)
+                    .read_to_end(&mut value_bytes)?;
+                if read != value_length {
+                    return Err(KvRequestError::Truncated);
+                }
 
-                if &value_carriage_return != b"\r\n" {
+                let mut value_crlf: [u8; 2] = [0; 2];
+                reader.read_exact(&mut value_crlf)?;
+
+                if &value_crlf != b"\r\n" {
                     return Err(KvRequestError::MissingCrlf("after put value".to_owned()));
                 }
 
@@ -216,7 +248,58 @@ mod tests {
     fn from_reader_for_kv_command_value_len_mismatch() {
         let mut byte_arr: &[u8] = b"Put\r\n5\r\n12345\r\n6\r\nSeven";
         let actual = KvCommand::from_reader(&mut byte_arr);
-        assert!(matches!(actual, Err(KvRequestError::IoError(_))));
+        assert!(matches!(actual, Err(KvRequestError::Truncated)));
+    }
+
+    #[test]
+    fn from_reader_for_kv_command_key_too_large() {
+        let mut byte_arr: &[u8] = b"Get\r\n70000\r\n";
+        let actual = KvCommand::from_reader(&mut byte_arr);
+        assert!(matches!(actual, Err(KvRequestError::KeyTooLarge(70000))));
+    }
+
+    #[test]
+    fn from_reader_for_kv_command_key_truncated() {
+        let mut byte_arr: &[u8] = b"Get\r\n10\r\nabc";
+        let actual = KvCommand::from_reader(&mut byte_arr);
+        assert!(matches!(actual, Err(KvRequestError::Truncated)));
+    }
+
+    #[test]
+    fn from_reader_for_kv_command_value_too_large() {
+        let mut byte_arr: &[u8] = b"Put\r\n3\r\nabc\r\n9999999999\r\n";
+        let actual = KvCommand::from_reader(&mut byte_arr);
+        assert!(matches!(actual, Err(KvRequestError::ValueTooLarge(_))));
+    }
+
+    #[test]
+    fn from_reader_key_length_exactly_at_cap_succeeds() {
+        // The cap check is `>`, so a key of exactly MAX_KEY_LEN must be accepted.
+        let key = vec![b'x'; MAX_KEY_LEN];
+        let mut wire = format!("Get\r\n{}\r\n", MAX_KEY_LEN).into_bytes();
+        wire.extend_from_slice(&key);
+        wire.extend_from_slice(b"\r\n");
+
+        let mut reader: &[u8] = &wire;
+        let actual = KvCommand::from_reader(&mut reader);
+        assert_eq!(actual.unwrap(), KvCommand::Get(key));
+    }
+
+    #[test]
+    fn from_reader_key_length_one_over_cap_fails() {
+        let wire = format!("Get\r\n{}\r\n", MAX_KEY_LEN + 1).into_bytes();
+        let mut reader: &[u8] = &wire;
+        let actual = KvCommand::from_reader(&mut reader);
+        assert!(matches!(actual, Err(KvRequestError::KeyTooLarge(n)) if n == MAX_KEY_LEN + 1));
+    }
+
+    #[test]
+    fn from_reader_value_length_one_over_cap_fails() {
+        // The cap is checked before any payload is read, so no value bytes needed.
+        let wire = format!("Put\r\n3\r\nabc\r\n{}\r\n", MAX_VALUE_LEN + 1).into_bytes();
+        let mut reader: &[u8] = &wire;
+        let actual = KvCommand::from_reader(&mut reader);
+        assert!(matches!(actual, Err(KvRequestError::ValueTooLarge(n)) if n == MAX_VALUE_LEN + 1));
     }
 
     #[test]
