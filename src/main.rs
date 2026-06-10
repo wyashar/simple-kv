@@ -3,6 +3,7 @@ use env_logger;
 
 mod config;
 mod kv_request;
+mod kv_response;
 mod kv_server;
 mod kv_store;
 mod tcp_server;
