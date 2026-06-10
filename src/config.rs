@@ -1,5 +1,3 @@
-use std::fmt;
-
 pub struct Config {
     pub server_address: String,
     pub server_port: u16,
@@ -8,30 +6,14 @@ pub struct Config {
 const SERVER_ADDRESS_ENV: &str = "SERVER_ADDRESS";
 const SERVER_PORT_ENV: &str = "SERVER_PORT";
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    #[error("{env_var} must be provided", env_var = SERVER_ADDRESS_ENV)]
     MissingServerAddress,
+    #[error("{env_var} must be provided", env_var = SERVER_PORT_ENV)]
     MissingServerPort,
-    InvalidPortFormat,
-}
-
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self {
-            Self::MissingServerAddress => write!(
-                f,
-                "Failed to create new value for Config: {SERVER_ADDRESS_ENV} must be provided by env!"
-            ),
-            Self::MissingServerPort => write!(
-                f,
-                "Failed to create new value for Config: {SERVER_PORT_ENV} must be provided by env!"
-            ),
-            Self::InvalidPortFormat => write!(
-                f,
-                "Failed to create new value for Config: {SERVER_PORT_ENV} must be a valid u16!"
-            ),
-        }
-    }
+    #[error("{env_var} must be a valid u16 {0:?}", env_var = SERVER_PORT_ENV)]
+    InvalidPortFormat(#[from] std::num::ParseIntError),
 }
 
 impl Config {
@@ -39,10 +21,9 @@ impl Config {
         let server_address =
             std::env::var(SERVER_ADDRESS_ENV).map_err(|_| ConfigError::MissingServerAddress)?;
 
-        let server_port = std::env::var(SERVER_PORT_ENV)
+        let server_port: u16 = std::env::var(SERVER_PORT_ENV)
             .map_err(|_| ConfigError::MissingServerPort)?
-            .parse::<u16>()
-            .map_err(|_| ConfigError::InvalidPortFormat)?;
+            .parse::<u16>()?;
 
         Ok(Self {
             server_address,
@@ -111,7 +92,7 @@ mod tests {
         }
 
         let result = Config::from_env();
-        assert!(matches!(result, Err(ConfigError::InvalidPortFormat)));
+        assert!(matches!(result, Err(ConfigError::InvalidPortFormat(_))));
     }
 
     #[test]
@@ -124,6 +105,6 @@ mod tests {
         }
 
         let result = Config::from_env();
-        assert!(matches!(result, Err(ConfigError::InvalidPortFormat)));
+        assert!(matches!(result, Err(ConfigError::InvalidPortFormat(_))));
     }
 }
