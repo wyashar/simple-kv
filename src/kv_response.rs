@@ -6,42 +6,38 @@ pub enum KvResponse {
     Error(String),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, thiserror::Error)]
 pub enum KvResponseError {
-    InvalidFirstCharEncoding,
-    UnrecognizedFirstChar(char),
-    InvalidErrorMessageEncoding,
-    InvalidUTF8Message,
+    #[error("response line was empty; expected a prefix byte")]
+    EmptyLine,
+    #[error("unrecognized response prefix byte: {0:?}")]
+    BadFirstChar(char),
+    #[error("response body was not valid UTF-8")]
+    BadUTF8(#[from] std::str::Utf8Error),
+    #[error("did not find a CRLF while parsing")]
     MissingCrlf,
+    #[error("io error parsing the response")]
+    Io(#[from] std::io::Error),
 }
 
 impl KvResponse {
     pub fn from_reader<T: BufRead>(reader: &mut T) -> Result<KvResponse, KvResponseError> {
-        // A response is a single CRLF-terminated line: <prefix><text>\r\n.
-        // Unlike requests, the text can't contain an embedded \r\n, so we can
-        // read the whole frame as one line rather than length-prefixing.
         let mut line: Vec<u8> = Vec::new();
-        reader
-            .read_until(b'\n', &mut line)
-            .map_err(|_| KvResponseError::InvalidErrorMessageEncoding)?;
+        reader.read_until(b'\n', &mut line)?;
 
-        let body = line
+        let payload = line
             .strip_suffix(b"\r\n")
             .ok_or(KvResponseError::MissingCrlf)?;
 
-        // Peel the prefix byte off the rest; the match below is the validation.
-        let (prefix, rest) = body
-            .split_first()
-            .ok_or(KvResponseError::InvalidFirstCharEncoding)?;
+        let (prefix, rest) = payload.split_first().ok_or(KvResponseError::EmptyLine)?;
 
         match prefix {
             b'+' => Ok(KvResponse::Okay),
             b'-' => {
-                let msg =
-                    std::str::from_utf8(rest).map_err(|_| KvResponseError::InvalidUTF8Message)?;
+                let msg = std::str::from_utf8(rest)?;
                 Ok(KvResponse::Error(msg.to_owned()))
             }
-            other => Err(KvResponseError::UnrecognizedFirstChar(*other as char)),
+            other => Err(KvResponseError::BadFirstChar(*other as char)),
         }
     }
 
@@ -74,49 +70,52 @@ mod tests {
     fn from_reader_okay() {
         let mut bytes: &[u8] = b"+Okay\r\n";
         let actual = KvResponse::from_reader(&mut bytes);
-        assert_eq!(actual, Ok(KvResponse::Okay));
+        assert_eq!(actual.unwrap(), KvResponse::Okay);
     }
 
     #[test]
     fn from_reader_error() {
         let mut bytes: &[u8] = b"-something broke\r\n";
         let actual = KvResponse::from_reader(&mut bytes);
-        assert_eq!(actual, Ok(KvResponse::Error("something broke".to_owned())));
+        assert_eq!(
+            actual.unwrap(),
+            KvResponse::Error("something broke".to_owned())
+        );
     }
 
     #[test]
     fn from_reader_error_empty_message() {
         let mut bytes: &[u8] = b"-\r\n";
         let actual = KvResponse::from_reader(&mut bytes);
-        assert_eq!(actual, Ok(KvResponse::Error(String::new())));
+        assert_eq!(actual.unwrap(), KvResponse::Error(String::new()));
     }
 
     #[test]
     fn from_reader_unrecognized_first_char() {
         let mut bytes: &[u8] = b"*hello\r\n";
         let actual = KvResponse::from_reader(&mut bytes);
-        assert_eq!(actual, Err(KvResponseError::UnrecognizedFirstChar('*')));
+        assert!(matches!(actual, Err(KvResponseError::BadFirstChar('*'))));
     }
 
     #[test]
     fn from_reader_missing_crlf() {
         let mut bytes: &[u8] = b"+Okay";
         let actual = KvResponse::from_reader(&mut bytes);
-        assert_eq!(actual, Err(KvResponseError::MissingCrlf));
+        assert!(matches!(actual, Err(KvResponseError::MissingCrlf)));
     }
 
     #[test]
     fn from_reader_empty_line() {
         let mut bytes: &[u8] = b"\r\n";
         let actual = KvResponse::from_reader(&mut bytes);
-        assert_eq!(actual, Err(KvResponseError::InvalidFirstCharEncoding));
+        assert!(matches!(actual, Err(KvResponseError::EmptyLine)));
     }
 
     #[test]
     fn from_reader_invalid_utf8_message() {
         let mut bytes: &[u8] = b"-\xff\xfe\r\n";
         let actual = KvResponse::from_reader(&mut bytes);
-        assert_eq!(actual, Err(KvResponseError::InvalidUTF8Message));
+        assert!(matches!(actual, Err(KvResponseError::BadUTF8(_))));
     }
 
     #[test]
