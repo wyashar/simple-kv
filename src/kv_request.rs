@@ -186,7 +186,9 @@ mod tests {
     fn from_reader_for_kv_command_bad_operator() {
         let mut byte_arr: &[u8] = b"InvalidOperation\r\n";
         let actual = KvCommand::from_reader(&mut byte_arr);
-        assert!(matches!(actual, Err(KvRequestError::BadOperation(op)) if op == "InvalidOperation"));
+        assert!(
+            matches!(actual, Err(KvRequestError::BadOperation(op)) if op == "InvalidOperation")
+        );
     }
 
     #[test]
@@ -252,7 +254,10 @@ mod tests {
     fn from_reader_for_kv_command_get_valid() {
         let mut byte_arr: &[u8] = b"Get\r\n17\r\nDrakeIsABadArtist\r\n";
         let actual = KvCommand::from_reader(&mut byte_arr);
-        assert_eq!(actual.unwrap(), KvCommand::Get(b"DrakeIsABadArtist".to_vec()));
+        assert_eq!(
+            actual.unwrap(),
+            KvCommand::Get(b"DrakeIsABadArtist".to_vec())
+        );
     }
 
     #[test]

@@ -1,26 +1,14 @@
 use log::info;
-use std::{
-    fmt,
-    net::{SocketAddr, TcpListener, TcpStream},
-};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum TcpServerError {
-    InvalidSocketAddressFormat(String),
-    InvalidPort(u16),
-    IoError(std::io::Error),
-}
-
-impl fmt::Display for TcpServerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidSocketAddressFormat(socket_address) => {
-                write!(f, "Invalid socket adddress format: {socket_address}")
-            }
-            Self::InvalidPort(port) => write!(f, "Invalid port: {port}"),
-            Self::IoError(e) => write!(f, "I/O error while binding tcp server: {e}"),
-        }
-    }
+    #[error("bad socket address. could not parse address {0} as SocketAddr")]
+    BadSocketAddr(String),
+    #[error("port {0} is not allowed")]
+    BadPort(u16),
+    #[error("could not bind to address {0:?}")]
+    Io(#[from] std::io::Error),
 }
 
 pub struct TcpServer {
@@ -30,17 +18,15 @@ pub struct TcpServer {
 impl TcpServer {
     pub fn bind(address: &str, port: u16) -> Result<Self, TcpServerError> {
         if port == 0 {
-            return Err(TcpServerError::InvalidPort(port));
+            return Err(TcpServerError::BadPort(port));
         }
 
-        let endpoint: SocketAddr = format!("{}:{}", address, port)
+        let addr: String = format!("{}:{}", address, port);
+        let endpoint: SocketAddr = addr
             .parse::<SocketAddr>()
-            .map_err(|_| {
-                TcpServerError::InvalidSocketAddressFormat(format!("{}:{}", address, port))
-            })?;
+            .map_err(|_| TcpServerError::BadSocketAddr(addr))?;
 
-        let tcp_listener: TcpListener =
-            TcpListener::bind(endpoint).map_err(TcpServerError::IoError)?;
+        let tcp_listener: TcpListener = TcpListener::bind(endpoint)?;
 
         info!("Server started on {}:{}", address, port);
 
@@ -48,7 +34,7 @@ impl TcpServer {
     }
 
     pub fn accept(&self) -> Result<(TcpStream, SocketAddr), TcpServerError> {
-        self.tcp_listener.accept().map_err(TcpServerError::IoError)
+        Ok(self.tcp_listener.accept()?)
     }
 }
 
@@ -62,7 +48,7 @@ mod tests {
         let port: u16 = 0;
         let actual: Result<TcpServer, TcpServerError> = TcpServer::bind(address, port);
 
-        assert!(matches!(actual, Err(TcpServerError::InvalidPort(0))));
+        assert!(matches!(actual, Err(TcpServerError::BadPort(0))));
     }
 
     #[test]
@@ -71,10 +57,7 @@ mod tests {
         let port: u16 = 8080;
         let actual: Result<TcpServer, TcpServerError> = TcpServer::bind(address, port);
 
-        assert!(matches!(
-            actual,
-            Err(TcpServerError::InvalidSocketAddressFormat(_))
-        ));
+        assert!(matches!(actual, Err(TcpServerError::BadSocketAddr(_))));
     }
 
     #[test]
@@ -84,7 +67,7 @@ mod tests {
 
         let actual: Result<TcpServer, TcpServerError> = TcpServer::bind("127.0.0.1", occupied_port);
 
-        assert!(matches!(actual, Err(TcpServerError::IoError(_))));
+        assert!(matches!(actual, Err(TcpServerError::Io(_))));
     }
 
     #[test]
