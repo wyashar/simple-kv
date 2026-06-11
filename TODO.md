@@ -9,3 +9,4 @@ TODO!
 6.) Unit testing kv server
 7.) Integration testings
 8.) Better way to test req=>res, maybe some kind of e2e tests in rust instead of the bash script
+9.) Send errors back to client
