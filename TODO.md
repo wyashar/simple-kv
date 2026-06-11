@@ -1,9 +1,11 @@
 TODO!
 
-1.) Send responses back to client
-2.) Better test coverage (only wireformat is tested, integration tests needed)
-3.) Multi-message per connection
-4.) Persistence (rn, restart = data loss)
-5.) Request size limiting
-6.) Read/write timeouts
-7.) Metrics and health endpoints
+
+1.) Send respones back to client for del and get requests
+2.) Multi-client connections
+3.) Persist the kv store on client disconnect
+4.) Read/write timeouts
+5.) Metrics and health endpoints
+6.) Unit testing kv server
+7.) Integration testings
+8.) Better way to test req=>res, maybe some kind of e2e tests in rust instead of the bash script

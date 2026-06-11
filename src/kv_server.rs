@@ -1,45 +1,67 @@
-use std::io::BufReader;
+use std::io::{BufReader, BufWriter, Error, Write};
+use std::net::SocketAddr;
 use std::net::TcpStream;
 
 use crate::config::Config;
 use crate::kv_request::{KvCommand, KvRequest};
+use crate::kv_response::KvResponse;
 use crate::kv_store::KvStore;
 use crate::tcp_server::TcpServer;
-use log::info;
+use log::{info, warn};
 
 pub fn run(config: Config) {
     let tcp_server: TcpServer = TcpServer::bind(&config.server_address, config.server_port)
         .expect("expected to bind to server address and port");
 
     loop {
-        let Ok((stream, client_addr)) = tcp_server.accept() else {
-            info!("Failed to connect to peer!");
-            continue;
-        };
-        info!("Connected to peer: {client_addr}");
-
-        let mut kv: KvStore<Vec<u8>, Vec<u8>> = KvStore::new();
-        let mut buf_reader: BufReader<&TcpStream> = BufReader::new(&stream);
-
-        match KvRequest::from_reader(&mut buf_reader) {
+        let (stream, client_addr) = match tcp_server.accept() {
+            Ok(pair) => pair,
             Err(e) => {
-                info!("Failed to deserialize KV Request: {:?}", e);
+                warn!("Failed to accept connection: {e}");
                 continue;
             }
-            Ok(request) => {
-                info!("{}", request.command);
-                match request.command {
-                    KvCommand::Del(key) => {
-                        kv.del(&key);
-                    }
-                    KvCommand::Get(key) => {
-                        kv.get(&key);
-                    }
-                    KvCommand::Put(key, value) => {
-                        kv.put(key, value);
-                    }
-                }
-            }
+        };
+
+        info!("Connected to peer: {client_addr}");
+
+        if let Err(e) = handle_connection(stream, client_addr) {
+            warn!("Failed to send response to {client_addr}: {e}. Terminating connection");
         }
     }
+}
+
+fn handle_connection(stream: TcpStream, client_addr: SocketAddr) -> Result<(), Error> {
+    let mut reader: BufReader<&TcpStream> = BufReader::new(&stream);
+    let mut writer: BufWriter<&TcpStream> = BufWriter::new(&stream);
+    let mut kv: KvStore<Vec<u8>, Vec<u8>> = KvStore::new();
+
+    loop {
+        let request = match KvRequest::from_reader(&mut reader) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Bad request from {client_addr}: {e}");
+                return Ok(());
+            }
+        };
+
+        match request.command {
+            KvCommand::Put(key, value) => {
+                kv.put(key, value);
+                send_response(&mut writer, &KvResponse::Okay.into_bytes())?;
+            }
+            KvCommand::Del(key) => {
+                kv.del(&key);
+            }
+            KvCommand::Get(key) => {
+                kv.get(&key);
+            }
+        }
+
+        writer.flush()?;
+    }
+}
+
+fn send_response(buf_writer: &mut BufWriter<&TcpStream>, res_bytes: &[u8]) -> Result<(), Error> {
+    buf_writer.write_all(res_bytes)?;
+    Ok(())
 }

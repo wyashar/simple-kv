@@ -17,9 +17,9 @@ const MAX_VALUE_LEN: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum KvRequestError {
-    #[error("expected to find a CRLF when parsing at: {0}")]
+    #[error("expected to find a CRLF when parsing at {0}")]
     MissingCrlf(String),
-    #[error("expected one of: {variants:?}, but got {0}", variants = KvCommand::VARIANTS)]
+    #[error("expected one of: {variants:?}, but got: {0}", variants = KvCommand::VARIANTS)]
     BadOperation(String),
     #[error("expected to parse valid utf-8 bytes")]
     BadUtf8Bytes(#[from] std::str::Utf8Error),
