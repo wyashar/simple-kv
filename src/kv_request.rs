@@ -23,7 +23,7 @@ pub enum KvRequestError {
     #[error("expected one of: {variants:?}, but got: {0}", variants = KvCommand::VARIANTS)]
     BadOperation(String),
     #[error("expected to parse valid utf-8 bytes")]
-    BadUtf8Bytes(#[from] std::str::Utf8Error),
+    BadUtf8(#[from] std::str::Utf8Error),
     #[error("io error parsing the request")]
     IoError(#[from] std::io::Error),
     #[error("keys and values should be valid usizes")]
@@ -119,12 +119,7 @@ impl KvCommand {
             return Err(KvRequestError::Truncated);
         }
 
-        let mut carriage_return: [u8; 2] = [0; 2];
-        reader.read_exact(&mut carriage_return)?;
-
-        if &carriage_return != CRLF {
-            return Err(KvRequestError::MissingCrlf("after key".to_owned()));
-        }
+        expect_crlf(reader, "after key")?;
 
         match op_str {
             "Get" => Ok(KvCommand::Get(key_bytes)),
@@ -152,18 +147,22 @@ impl KvCommand {
                     return Err(KvRequestError::Truncated);
                 }
 
-                let mut value_crlf: [u8; 2] = [0; 2];
-                reader.read_exact(&mut value_crlf)?;
-
-                if &value_crlf != CRLF {
-                    return Err(KvRequestError::MissingCrlf("after put value".to_owned()));
-                }
+                expect_crlf(reader, "after put value")?;
 
                 Ok(KvCommand::Put(key_bytes, value_bytes))
             }
             _ => unreachable!("all variants of Operation were matched as strs during byte parsing"),
         }
     }
+}
+
+fn expect_crlf<R: Read>(reader: &mut R, context: &str) -> Result<(), KvRequestError> {
+    let mut buf: [u8; 2] = [0; 2];
+    reader.read_exact(&mut buf)?;
+    if &buf != CRLF {
+        return Err(KvRequestError::MissingCrlf(context.to_owned()));
+    }
+    Ok(())
 }
 
 impl fmt::Display for KvCommand {
@@ -182,6 +181,12 @@ impl fmt::Display for KvCommand {
                 write!(f, "key={key_lossy} value={value_lossy}")
             }
         }
+    }
+}
+
+impl fmt::Display for KvRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.command)
     }
 }
 
@@ -295,21 +300,21 @@ mod tests {
     fn from_reader_for_kv_command_non_utf8_operation() {
         let mut byte_arr: &[u8] = b"\xff\xfe\r\n";
         let actual = KvCommand::from_reader(&mut byte_arr);
-        assert!(matches!(actual, Err(KvRequestError::BadUtf8Bytes(_))));
+        assert!(matches!(actual, Err(KvRequestError::BadUtf8(_))));
     }
 
     #[test]
     fn from_reader_for_kv_command_non_utf8_key_length() {
         let mut byte_arr: &[u8] = b"Put\r\n\xff\xfe\r\n";
         let actual = KvCommand::from_reader(&mut byte_arr);
-        assert!(matches!(actual, Err(KvRequestError::BadUtf8Bytes(_))));
+        assert!(matches!(actual, Err(KvRequestError::BadUtf8(_))));
     }
 
     #[test]
     fn from_reader_for_kv_command_non_utf8_value_length() {
         let mut byte_arr: &[u8] = b"Put\r\n3\r\nabc\r\n\xff\xfe\r\n";
         let actual = KvCommand::from_reader(&mut byte_arr);
-        assert!(matches!(actual, Err(KvRequestError::BadUtf8Bytes(_))));
+        assert!(matches!(actual, Err(KvRequestError::BadUtf8(_))));
     }
 
     #[test]

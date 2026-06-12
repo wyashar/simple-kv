@@ -1,9 +1,11 @@
+use std::borrow::Cow;
 use std::io::{BufReader, BufWriter, Error, Write};
 use std::net::SocketAddr;
 use std::net::TcpStream;
 
 use crate::config::Config;
 use crate::kv_request::{KvCommand, KvRequest};
+use crate::kv_response::KvResponse;
 use crate::kv_store::KvStore;
 use crate::tcp_server::TcpServer;
 use log::{info, warn};
@@ -39,28 +41,42 @@ fn handle_connection(stream: TcpStream, client_addr: SocketAddr) -> Result<(), E
             Ok(r) => r,
             Err(e) => {
                 warn!("Bad request from {client_addr}: {e}");
+                send_response(&mut writer, KvResponse::Error(e.to_string()), client_addr)?;
                 return Ok(());
             }
         };
 
+        info!("Received: [{request}] from {client_addr}");
+
         match request.command {
             KvCommand::Put(key, value) => {
                 kv.put(key, value);
-                // send_response(&mut writer, &KvResponse::Okay.into_bytes())?;
+                send_response(&mut writer, KvResponse::Okay, client_addr)?;
             }
             KvCommand::Del(key) => {
                 kv.del(&key);
+                send_response(&mut writer, KvResponse::Okay, client_addr)?;
             }
             KvCommand::Get(key) => {
-                kv.get(&key);
+                let res = match kv.get(&key) {
+                    None => KvResponse::NotFound,
+                    Some(val) => KvResponse::Value(Cow::Borrowed(val)),
+                };
+
+                send_response(&mut writer, res, client_addr)?;
             }
         }
-
-        writer.flush()?;
     }
 }
 
-fn send_response(buf_writer: &mut BufWriter<&TcpStream>, res_bytes: &[u8]) -> Result<(), Error> {
-    buf_writer.write_all(res_bytes)?;
+fn send_response(
+    buf_writer: &mut BufWriter<&TcpStream>,
+    res: KvResponse,
+    client_addr: SocketAddr,
+) -> Result<(), std::io::Error> {
+    res.write_to(buf_writer)?;
+    buf_writer.flush()?;
+    info!("Sent: [{res}] to {client_addr}");
+
     Ok(())
 }
