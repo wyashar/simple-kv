@@ -6,7 +6,7 @@ use std::io::Write;
 use std::num::ParseIntError;
 use std::str::Utf8Error;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, strum::IntoStaticStr)]
 pub enum KvResponse<'a> {
     Okay,
     Error(String),
@@ -48,6 +48,10 @@ impl<'a> KvResponse<'a> {
             Self::Value(_) => VALUE_PREFIX,
             Self::NotFound => NOTFOUND_PREFIX,
         }
+    }
+
+    fn name(&self) -> &'static str {
+        self.into()
     }
 
     pub fn from_reader<T: BufRead>(reader: &mut T) -> Result<KvResponse<'a>, KvResponseError> {
@@ -122,11 +126,12 @@ fn expect_crlf<R: Read>(reader: &mut R) -> Result<(), KvResponseError> {
 impl fmt::Display for KvResponse<'_> {
     // Lossy: a Value's non-UTF8 bytes are replaced with U+FFFD. Display only, not for round-tripping.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name())?;
+
         match self {
-            Self::Okay => write!(f, "Okay"),
-            Self::Error(e) => write!(f, "Error: {e}"),
-            Self::Value(bytes) => write!(f, "Value: {}", String::from_utf8_lossy(bytes)),
-            Self::NotFound => write!(f, "NotFound"),
+            Self::Error(e) => write!(f, ": {e}"),
+            Self::Value(bytes) => write!(f, ": {}", String::from_utf8_lossy(bytes)),
+            Self::Okay | Self::NotFound => Ok(()),
         }
     }
 }
