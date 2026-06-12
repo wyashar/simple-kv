@@ -1,9 +1,12 @@
+use std::borrow::Cow;
 use std::io::BufRead;
+use std::io::Write;
 
 #[derive(Debug, PartialEq)]
-pub enum KvResponse {
+pub enum KvResponse<'a> {
     Okay,
     Error(String),
+    Value(Cow<'a, [u8]>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -20,8 +23,20 @@ pub enum KvResponseError {
     Io(#[from] std::io::Error),
 }
 
-impl KvResponse {
-    pub fn from_reader<T: BufRead>(reader: &mut T) -> Result<KvResponse, KvResponseError> {
+impl<'a> KvResponse<'a> {
+    const OKAY_PREFIX: u8 = b'+';
+    const ERROR_PREFIX: u8 = b'-';
+    const VALUE_PREFIX: u8 = b'$';
+
+    fn prefix(&self) -> u8 {
+        match self {
+            Self::Okay => Self::OKAY_PREFIX,
+            Self::Error(_) => Self::ERROR_PREFIX,
+            Self::Value(_) => Self::VALUE_PREFIX,
+        }
+    }
+
+    pub fn from_reader<T: BufRead>(reader: &mut T) -> Result<KvResponse<'a>, KvResponseError> {
         let mut line: Vec<u8> = Vec::new();
         reader.read_until(b'\n', &mut line)?;
 
@@ -31,34 +46,28 @@ impl KvResponse {
 
         let (prefix, rest) = payload.split_first().ok_or(KvResponseError::EmptyLine)?;
 
-        match prefix {
-            b'+' => Ok(KvResponse::Okay),
-            b'-' => {
+        match *prefix {
+            Self::OKAY_PREFIX => Ok(KvResponse::Okay),
+            Self::ERROR_PREFIX => {
                 let msg = std::str::from_utf8(rest)?;
                 Ok(KvResponse::Error(msg.to_owned()))
             }
-            other => Err(KvResponseError::BadFirstChar(*other as char)),
+            Self::VALUE_PREFIX => Ok(KvResponse::Value(Cow::Owned(rest.to_owned()))),
+            other => Err(KvResponseError::BadFirstChar(other as char)),
         }
     }
 
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.into()
-    }
-}
+    pub fn write_to<W: Write>(&self, w: &mut W) -> Result<(), std::io::Error> {
+        w.write_all(&[self.prefix()])?;
 
-impl From<KvResponse> for Vec<u8> {
-    fn from(kv_response: KvResponse) -> Vec<u8> {
-        let mut buffer: Vec<u8> = Vec::new();
-        match kv_response {
-            KvResponse::Okay => buffer.extend_from_slice(b"+Okay\r\n"),
-            KvResponse::Error(str) => {
-                buffer.push(b'-');
-                buffer.extend_from_slice(str.as_bytes());
-                buffer.extend_from_slice(b"\r\n");
-            }
+        match self {
+            Self::Okay => w.write_all(b"Okay")?,
+            Self::Error(e) => w.write_all(e.as_bytes())?,
+            Self::Value(bytes) => w.write_all(&bytes)?,
         }
 
-        buffer
+        w.write_all(b"\r\n")?;
+        Ok(())
     }
 }
 

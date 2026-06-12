@@ -4,7 +4,6 @@ use std::net::TcpStream;
 
 use crate::config::Config;
 use crate::kv_request::{KvCommand, KvRequest};
-use crate::kv_response::KvResponse;
 use crate::kv_store::KvStore;
 use crate::tcp_server::TcpServer;
 use log::{info, warn};
@@ -47,7 +46,7 @@ fn handle_connection(stream: TcpStream, client_addr: SocketAddr) -> Result<(), E
         match request.command {
             KvCommand::Put(key, value) => {
                 kv.put(key, value);
-                send_response(&mut writer, &KvResponse::Okay.into_bytes())?;
+                // send_response(&mut writer, &KvResponse::Okay.into_bytes())?;
             }
             KvCommand::Del(key) => {
                 kv.del(&key);

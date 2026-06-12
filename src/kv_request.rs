@@ -125,7 +125,7 @@ impl KvCommand {
                 reader.read_exact(&mut value_crlf)?;
 
                 if &value_crlf != b"\r\n" {
-                    return Err(KvRequestError::MissingCrlf("after put value".to_owned()));
+                    return Err(KvRequestError::MissingCrlf("after put's value".to_owned()));
                 }
 
                 Ok(KvCommand::Put(key_bytes, value_bytes))
