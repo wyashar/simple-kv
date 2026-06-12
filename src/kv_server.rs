@@ -1,7 +1,8 @@
 use std::borrow::Cow;
-use std::io::{BufReader, BufWriter, Error, Write};
+use std::io::{BufRead, BufReader, BufWriter, Error, Write};
 use std::net::SocketAddr;
 use std::net::TcpStream;
+use std::time::Duration;
 
 use crate::config::Config;
 use crate::kv_request::{KvCommand, KvRequest};
@@ -9,6 +10,8 @@ use crate::kv_response::KvResponse;
 use crate::kv_store::KvStore;
 use crate::tcp_server::TcpServer;
 use log::{info, warn};
+
+const TIMEOUT_DURATION: Duration = Duration::from_hours(2);
 
 pub fn run(config: Config) {
     let tcp_server: TcpServer = TcpServer::bind(&config.server_address, config.server_port)
@@ -22,6 +25,10 @@ pub fn run(config: Config) {
                 continue;
             }
         };
+
+        stream
+            .set_read_timeout(Some(TIMEOUT_DURATION))
+            .expect("expected timeout duration to be set succesfully");
 
         info!("Connected to peer: {client_addr}");
 
@@ -37,6 +44,11 @@ fn handle_connection(stream: TcpStream, client_addr: SocketAddr) -> Result<(), E
     let mut kv: KvStore<Vec<u8>, Vec<u8>> = KvStore::new();
 
     loop {
+        if reader.fill_buf()?.is_empty() {
+            info!("Client {client_addr} has successfully disconnected");
+            return Ok(());
+        }
+
         let request = match KvRequest::from_reader(&mut reader) {
             Ok(r) => r,
             Err(e) => {
