@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    io::{BufRead, Read},
+    io::{BufRead, Read, Write},
     num::ParseIntError,
 };
 
@@ -14,6 +14,7 @@ pub struct KvRequest {
 
 const MAX_KEY_LEN: usize = 64 * 1024;
 const MAX_VALUE_LEN: usize = 8 * 1024 * 1024;
+const CRLF: &[u8; 2] = b"\r\n";
 
 #[derive(Debug, thiserror::Error)]
 pub enum KvRequestError {
@@ -35,7 +36,7 @@ pub enum KvRequestError {
     Truncated,
 }
 
-#[derive(Debug, Clone, PartialEq, strum::VariantNames)]
+#[derive(Debug, Clone, PartialEq, strum::VariantNames, strum::IntoStaticStr)]
 #[strum(serialize_all = "PascalCase")]
 pub enum KvCommand {
     Put(Vec<u8>, Vec<u8>),
@@ -52,12 +53,42 @@ impl KvRequest {
 }
 
 impl KvCommand {
+    fn name(&self) -> &'static str {
+        self.into()
+    }
+
+    pub fn write_to<W: Write>(&self, w: &mut W) -> Result<(), std::io::Error> {
+        w.write_all(self.name().as_bytes())?;
+        w.write_all(CRLF)?;
+
+        match self {
+            Self::Get(key) | Self::Del(key) => {
+                w.write_all(key.len().to_string().as_bytes())?;
+                w.write_all(CRLF)?;
+                w.write_all(key)?;
+            }
+            Self::Put(key, value) => {
+                w.write_all(key.len().to_string().as_bytes())?;
+                w.write_all(CRLF)?;
+                w.write_all(key)?;
+                w.write_all(CRLF)?;
+                w.write_all(value.len().to_string().as_bytes())?;
+                w.write_all(CRLF)?;
+                w.write_all(value)?;
+            }
+        }
+
+        w.write_all(CRLF)?;
+
+        Ok(())
+    }
+
     pub fn from_reader<T: BufRead>(reader: &mut T) -> Result<KvCommand, KvRequestError> {
         let mut op_bytes: Vec<u8> = Vec::new();
         reader.read_until(b'\n', &mut op_bytes)?;
 
         let op_bytes_trimmed = op_bytes
-            .strip_suffix(b"\r\n")
+            .strip_suffix(CRLF)
             .ok_or(KvRequestError::MissingCrlf("after operation".to_owned()))?;
 
         let op_str: &str = std::str::from_utf8(op_bytes_trimmed)?;
@@ -70,7 +101,7 @@ impl KvCommand {
         reader.read_until(b'\n', &mut key_length_bytes)?;
 
         let key_length_bytes_trimmed = key_length_bytes
-            .strip_suffix(b"\r\n")
+            .strip_suffix(CRLF)
             .ok_or(KvRequestError::MissingCrlf("after key length".to_owned()))?;
 
         let key_length: usize = std::str::from_utf8(key_length_bytes_trimmed)?.parse()?;
@@ -91,7 +122,7 @@ impl KvCommand {
         let mut carriage_return: [u8; 2] = [0; 2];
         reader.read_exact(&mut carriage_return)?;
 
-        if &carriage_return != b"\r\n" {
+        if &carriage_return != CRLF {
             return Err(KvRequestError::MissingCrlf("after key".to_owned()));
         }
 
@@ -103,7 +134,7 @@ impl KvCommand {
                 reader.read_until(b'\n', &mut value_length_bytes)?;
 
                 let value_length_bytes_trimmed = value_length_bytes
-                    .strip_suffix(b"\r\n")
+                    .strip_suffix(CRLF)
                     .ok_or(KvRequestError::MissingCrlf("after value length".to_owned()))?;
                 let value_length: usize =
                     std::str::from_utf8(value_length_bytes_trimmed)?.parse()?;
@@ -124,8 +155,8 @@ impl KvCommand {
                 let mut value_crlf: [u8; 2] = [0; 2];
                 reader.read_exact(&mut value_crlf)?;
 
-                if &value_crlf != b"\r\n" {
-                    return Err(KvRequestError::MissingCrlf("after put's value".to_owned()));
+                if &value_crlf != CRLF {
+                    return Err(KvRequestError::MissingCrlf("after put value".to_owned()));
                 }
 
                 Ok(KvCommand::Put(key_bytes, value_bytes))
@@ -135,62 +166,20 @@ impl KvCommand {
     }
 }
 
-impl KvCommand {
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.into()
-    }
-}
-
-impl From<KvCommand> for Vec<u8> {
-    fn from(cmd: KvCommand) -> Self {
-        let mut buf = Vec::new();
-        match cmd {
-            KvCommand::Put(key, value) => {
-                buf.extend_from_slice(b"Put\r\n");
-                buf.extend_from_slice(key.len().to_string().as_bytes());
-                buf.extend_from_slice(b"\r\n");
-                buf.extend_from_slice(&key);
-                buf.extend_from_slice(b"\r\n");
-                buf.extend_from_slice(value.len().to_string().as_bytes());
-                buf.extend_from_slice(b"\r\n");
-                buf.extend_from_slice(&value);
-                buf.extend_from_slice(b"\r\n");
-            }
-            KvCommand::Get(key) => {
-                buf.extend_from_slice(b"Get\r\n");
-                buf.extend_from_slice(key.len().to_string().as_bytes());
-                buf.extend_from_slice(b"\r\n");
-                buf.extend_from_slice(&key);
-                buf.extend_from_slice(b"\r\n");
-            }
-            KvCommand::Del(key) => {
-                buf.extend_from_slice(b"Del\r\n");
-                buf.extend_from_slice(key.len().to_string().as_bytes());
-                buf.extend_from_slice(b"\r\n");
-                buf.extend_from_slice(&key);
-                buf.extend_from_slice(b"\r\n");
-            }
-        }
-        buf
-    }
-}
-
 impl fmt::Display for KvCommand {
     // Lossy: non-UTF8 bytes are replaced with U+FFFD. Do not use for round-tripping (KvCommand -> Display/ToString -> KvCommand).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ", self.name())?;
+
         match self {
+            Self::Del(key) | Self::Get(key) => {
+                let key_lossy = String::from_utf8_lossy(key);
+                write!(f, "key={key_lossy}")
+            }
             Self::Put(key, value) => {
                 let key_lossy = String::from_utf8_lossy(key);
                 let value_lossy = String::from_utf8_lossy(value);
-                write!(f, "Put key={key_lossy} value={value_lossy}")
-            }
-            Self::Get(key) => {
-                let key_lossy = String::from_utf8_lossy(key);
-                write!(f, "Get key={key_lossy}")
-            }
-            Self::Del(key) => {
-                let key_lossy = String::from_utf8_lossy(key);
-                write!(f, "Del key={key_lossy}")
+                write!(f, "key={key_lossy} value={value_lossy}")
             }
         }
     }
@@ -278,7 +267,7 @@ mod tests {
         let key = vec![b'x'; MAX_KEY_LEN];
         let mut wire = format!("Get\r\n{}\r\n", MAX_KEY_LEN).into_bytes();
         wire.extend_from_slice(&key);
-        wire.extend_from_slice(b"\r\n");
+        wire.extend_from_slice(CRLF);
 
         let mut reader: &[u8] = &wire;
         let actual = KvCommand::from_reader(&mut reader);
@@ -413,49 +402,55 @@ mod tests {
     }
 
     #[test]
-    fn kv_command_into_bytes_roundtrip_put() {
+    fn kv_command_write_to_roundtrip_put() {
         let original = KvCommand::Put(b"MyKey".to_vec(), b"MyValue".to_vec());
-        let bytes = original.clone().into_bytes();
+        let mut bytes: Vec<u8> = Vec::new();
+        original.write_to(&mut bytes).expect("works");
         let roundtripped = KvCommand::from_reader(&mut &bytes[..]).expect("valid bytes");
         assert_eq!(original, roundtripped);
     }
 
     #[test]
-    fn kv_command_into_bytes_roundtrip_get() {
+    fn kv_command_write_to_roundtrip_get() {
         let original = KvCommand::Get(b"MyKey".to_vec());
-        let bytes = original.clone().into_bytes();
+        let mut bytes: Vec<u8> = Vec::new();
+        original.write_to(&mut bytes).expect("works");
         let roundtripped = KvCommand::from_reader(&mut &bytes[..]).expect("valid bytes");
         assert_eq!(original, roundtripped);
     }
 
     #[test]
-    fn kv_command_into_bytes_roundtrip_del() {
+    fn kv_command_write_to_roundtrip_del() {
         let original = KvCommand::Del(b"MyKey".to_vec());
-        let bytes = original.clone().into_bytes();
+        let mut bytes: Vec<u8> = Vec::new();
+        original.write_to(&mut bytes).expect("works");
         let roundtripped = KvCommand::from_reader(&mut &bytes[..]).expect("valid bytes");
         assert_eq!(original, roundtripped);
     }
 
     #[test]
-    fn kv_command_into_bytes_roundtrip_put_non_utf8_value() {
+    fn kv_command_write_to_roundtrip_put_non_utf8_value() {
         let original = KvCommand::Put(b"key".to_vec(), vec![0xFF, 0xFE, 0x00, 0xC3, 0x28]);
-        let bytes = original.clone().into_bytes();
+        let mut bytes: Vec<u8> = Vec::new();
+        original.write_to(&mut bytes).expect("works");
         let roundtripped = KvCommand::from_reader(&mut &bytes[..]).expect("valid bytes");
         assert_eq!(original, roundtripped);
     }
 
     #[test]
-    fn kv_command_into_bytes_roundtrip_get_non_utf8_key() {
+    fn kv_command_write_to_roundtrip_get_non_utf8_key() {
         let original = KvCommand::Get(vec![0xFF, 0xFE, 0x00, 0xC3, 0x28]);
-        let bytes = original.clone().into_bytes();
+        let mut bytes: Vec<u8> = Vec::new();
+        original.write_to(&mut bytes).expect("works");
         let roundtripped = KvCommand::from_reader(&mut &bytes[..]).expect("valid bytes");
         assert_eq!(original, roundtripped);
     }
 
     #[test]
-    fn kv_command_into_bytes_roundtrip_del_non_utf8_key() {
+    fn kv_command_write_to_roundtrip_del_non_utf8_key() {
         let original = KvCommand::Del(vec![0xFF, 0xFE, 0x00, 0xC3, 0x28]);
-        let bytes = original.clone().into_bytes();
+        let mut bytes: Vec<u8> = Vec::new();
+        original.write_to(&mut bytes).expect("works");
         let roundtripped = KvCommand::from_reader(&mut &bytes[..]).expect("valid bytes");
         assert_eq!(original, roundtripped);
     }
