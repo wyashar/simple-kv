@@ -99,14 +99,13 @@ impl<'a> KvResponse<'a> {
         w.write_all(&[self.prefix()])?;
 
         match self {
-            Self::Okay => {}
             Self::Error(e) => w.write_all(e.as_bytes())?,
             Self::Value(bytes) => {
                 w.write_all(bytes.len().to_string().as_bytes())?;
                 w.write_all(CRLF)?;
                 w.write_all(&bytes)?
             }
-            Self::NotFound => {}
+            Self::NotFound | Self::Okay => {}
         }
 
         w.write_all(CRLF)?;
