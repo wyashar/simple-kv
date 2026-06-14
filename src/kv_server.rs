@@ -5,7 +5,7 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::kv_request::{KvCommand, KvRequest};
+use crate::kv_request::{KvCommand, KvRequest, KvRequestError};
 use crate::kv_response::KvResponse;
 use crate::kv_store::KvStore;
 use crate::tcp_server::TcpServer;
@@ -51,10 +51,21 @@ fn handle_connection(stream: TcpStream, client_addr: SocketAddr) -> Result<(), E
 
         let request = match KvRequest::from_reader(&mut reader) {
             Ok(r) => r,
+            Err(KvRequestError::IoError(e)) => {
+                warn!("Failed to parse request due to I/O error: {e}");
+                if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                    let _ = send_response(
+                        &mut writer,
+                        KvResponse::Error("hit an unexpected eof while parsing".to_owned()),
+                        client_addr,
+                    );
+                }
+                return Err(e);
+            }
             Err(e) => {
                 warn!("Bad request from {client_addr}: {e}");
                 send_response(&mut writer, KvResponse::Error(e.to_string()), client_addr)?;
-                return Ok(());
+                continue;
             }
         };
 

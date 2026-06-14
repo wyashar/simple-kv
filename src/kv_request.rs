@@ -35,6 +35,12 @@ pub enum KvRequestError {
     OperationTooLarge(usize),
     #[error("value length {0} exceeds maximum of {max}", max = MAX_VALUE_LEN)]
     ValueTooLarge(usize),
+    #[error("{location} of declared length {needed} exceeds the {remaining} bytes left in the request payload")]
+    PayloadTruncated {
+        location: String,
+        needed: usize,
+        remaining: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, strum::VariantNames, strum::IntoStaticStr)]
@@ -111,9 +117,7 @@ impl KvCommand {
             return Err(KvRequestError::OperationTooLarge(op_len));
         }
 
-        let mut op_bytes: Vec<u8> = vec![0; op_len];
-        reader.read_exact(&mut op_bytes)?;
-        consume_crlf(reader, "operation")?;
+        let op_bytes = parse_field(reader, op_len, "operation")?;
 
         let op_str: &str = std::str::from_utf8(&op_bytes)?;
         if !KvCommand::VARIANTS.contains(&op_str) {
@@ -125,9 +129,7 @@ impl KvCommand {
             return Err(KvRequestError::KeyTooLarge(key_len));
         }
 
-        let mut key_bytes: Vec<u8> = vec![0; key_len];
-        reader.read_exact(&mut key_bytes)?;
-        consume_crlf(reader, "key")?;
+        let key_bytes = parse_field(reader, key_len, "key")?;
 
         Ok(match op_str {
             "Get" => KvCommand::Get(key_bytes),
@@ -138,14 +140,33 @@ impl KvCommand {
                     return Err(KvRequestError::ValueTooLarge(value_len));
                 }
 
-                let mut value_bytes: Vec<u8> = vec![0; value_len];
-                reader.read_exact(&mut value_bytes)?;
+                let value_bytes = parse_field(reader, value_len, "value")?;
 
                 KvCommand::Put(key_bytes, value_bytes)
             }
             _ => unreachable!("all variants of Operation were matched as strs during byte parsing"),
         })
     }
+}
+
+fn parse_field<R: BufRead>(
+    reader: &mut R,
+    len: usize,
+    location: &str,
+) -> Result<Vec<u8>, KvRequestError> {
+    let remaining = reader.fill_buf()?.len();
+    if len > remaining {
+        return Err(KvRequestError::PayloadTruncated {
+            location: location.to_owned(),
+            needed: len,
+            remaining,
+        });
+    }
+
+    let mut bytes: Vec<u8> = vec![0; len];
+    reader.read_exact(&mut bytes)?;
+    consume_crlf(reader, location)?;
+    Ok(bytes)
 }
 
 fn consume_crlf<R: Read>(reader: &mut R, crlf_location: &str) -> Result<(), KvRequestError> {
@@ -241,7 +262,10 @@ mod tests {
     fn from_reader_for_kv_command_value_len_mismatch() {
         let mut byte_arr: &[u8] = b"3\r\nPut\r\n5\r\n12345\r\n6\r\nSeven";
         let actual = KvCommand::from_reader(&mut byte_arr);
-        assert!(matches!(actual, Err(KvRequestError::IoError(_))));
+        assert!(matches!(
+            actual,
+            Err(KvRequestError::PayloadTruncated { needed: 6, remaining: 5, .. })
+        ));
     }
 
     #[test]
@@ -255,7 +279,10 @@ mod tests {
     fn from_reader_for_kv_command_key_truncated() {
         let mut byte_arr: &[u8] = b"3\r\nGet\r\n10\r\nabc";
         let actual = KvCommand::from_reader(&mut byte_arr);
-        assert!(matches!(actual, Err(KvRequestError::IoError(_))));
+        assert!(matches!(
+            actual,
+            Err(KvRequestError::PayloadTruncated { needed: 10, remaining: 3, .. })
+        ));
     }
 
     #[test]
