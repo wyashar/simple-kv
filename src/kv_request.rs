@@ -35,7 +35,9 @@ pub enum KvRequestError {
     OperationTooLarge(usize),
     #[error("value length {0} exceeds maximum of {max}", max = MAX_VALUE_LEN)]
     ValueTooLarge(usize),
-    #[error("{location} of declared length {needed} exceeds the {remaining} bytes left in the request payload")]
+    #[error(
+        "{location} of declared length {needed} exceeds the {remaining} bytes left in the request payload"
+    )]
     PayloadTruncated {
         location: String,
         needed: usize,
@@ -264,7 +266,11 @@ mod tests {
         let actual = KvCommand::from_reader(&mut byte_arr);
         assert!(matches!(
             actual,
-            Err(KvRequestError::PayloadTruncated { needed: 6, remaining: 5, .. })
+            Err(KvRequestError::PayloadTruncated {
+                needed: 6,
+                remaining: 5,
+                ..
+            })
         ));
     }
 
@@ -281,7 +287,11 @@ mod tests {
         let actual = KvCommand::from_reader(&mut byte_arr);
         assert!(matches!(
             actual,
-            Err(KvRequestError::PayloadTruncated { needed: 10, remaining: 3, .. })
+            Err(KvRequestError::PayloadTruncated {
+                needed: 10,
+                remaining: 3,
+                ..
+            })
         ));
     }
 

@@ -1,6 +1,7 @@
 use crate::config::Config;
 use env_logger;
 
+mod append_only_file;
 mod config;
 mod kv_request;
 mod kv_response;

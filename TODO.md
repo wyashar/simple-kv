@@ -11,3 +11,5 @@ TODO!
 8.) Better way to test req=>res, maybe some kind of e2e tests in rust instead of the bash script
 9.) Send errors back to client
 10.) Right now connection closure logs with a misleading parsing error, need to differeniate EOF and bad requests
+11.) File sync policy for the AppendOnlyFile
+12.) Proper temp dir / scratch space setup (using config struct)
