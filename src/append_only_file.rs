@@ -5,32 +5,28 @@ pub struct AppendOnlyFile {
     buf_writer: BufWriter<File>,
 }
 
-impl AppendOnlyFile {
-    pub fn open_file(file_path: &str) -> Result<AppendOnlyFile, std::io::Error> {
-        let file: File = OpenOptions::new().append(true).open(file_path)?;
-
-        Ok(AppendOnlyFile {
-            buf_writer: BufWriter::new(file),
-        })
+impl Write for AppendOnlyFile {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
+        self.buf_writer.write(buf)
     }
 
-    pub fn create_file(file_path: &str) -> Result<AppendOnlyFile, std::io::Error> {
+    // TODO: implement file sync policy! flush() only pushes the BufWriter's
+    // contents to the OS; it does not fsync, so a crash can still lose data.
+    fn flush(&mut self) -> Result<(), std::io::Error> {
+        self.buf_writer.flush()
+    }
+}
+
+impl AppendOnlyFile {
+    pub fn open_or_create(file_path: &str) -> Result<AppendOnlyFile, std::io::Error> {
         let file: File = OpenOptions::new()
             .append(true)
-            .create_new(true)
+            .create(true)
             .open(file_path)?;
 
         Ok(AppendOnlyFile {
             buf_writer: BufWriter::new(file),
         })
-    }
-
-    // TODO: implement file sync policy!
-    // TODO: Flushing on every input is kinda bad. Also, we never sync, which is also bad.
-    pub fn append(&mut self, data: &[u8]) -> Result<(), std::io::Error> {
-        self.buf_writer.write_all(data)?;
-        self.buf_writer.flush()?;
-        Ok(())
     }
 }
 
@@ -51,60 +47,39 @@ mod tests {
     }
 
     #[test]
-    fn create_file_and_write_to_it() {
+    fn creates_file_when_it_doesnt_exist_and_writes_to_it() {
         let dir = TempDir::new().expect("temp dir creation should work");
         let file_path = file_path(&dir, "tmp.log");
-        let append_file_res: Result<AppendOnlyFile, std::io::Error> =
-            AppendOnlyFile::create_file(&file_path);
-        assert!(matches!(append_file_res, Ok(_)));
-        let mut append_file: AppendOnlyFile = append_file_res.unwrap();
+        assert!(!Path::new(&file_path).exists());
 
-        let path: &Path = Path::new(&file_path);
-        assert!(path.exists());
+        let mut append_file: AppendOnlyFile =
+            AppendOnlyFile::open_or_create(&file_path).expect("open_or_create should work");
+
+        assert!(Path::new(&file_path).exists());
         append_file
-            .append(b"some data")
+            .write_all(b"some data")
             .expect("write should work here");
+        append_file.flush().expect("flush should work here");
 
         let contents = std::fs::read(&file_path).expect("read should work");
         assert_eq!(contents, b"some data");
     }
 
     #[test]
-    fn create_file_fails_when_it_already_exists() {
+    fn opens_existing_file_and_appends_without_truncating() {
         let dir = TempDir::new().expect("temp dir creation should work");
         let file_path = file_path(&dir, "tmp.log");
-        File::create(&file_path).expect("file creation works");
-        let append_file_res: Result<AppendOnlyFile, std::io::Error> =
-            AppendOnlyFile::create_file(&file_path);
-        assert!(matches!(append_file_res, Err(_)));
-    }
+        std::fs::write(&file_path, b"existing ").expect("seeding the file should work");
 
-    #[test]
-    fn open_file_and_write_to_it() {
-        let dir = TempDir::new().expect("temp dir creation should work");
-        let file_path = file_path(&dir, "tmp.log");
-        File::create(&file_path).expect("file creationg works");
-        let append_file_res: Result<AppendOnlyFile, std::io::Error> =
-            AppendOnlyFile::open_file(&file_path);
-        assert!(matches!(append_file_res, Ok(_)));
-        let mut append_file: AppendOnlyFile = append_file_res.unwrap();
+        let mut append_file: AppendOnlyFile =
+            AppendOnlyFile::open_or_create(&file_path).expect("open_or_create should work");
 
-        let path: &Path = Path::new(&file_path);
-        assert!(path.exists());
         append_file
-            .append(b"some data")
+            .write_all(b"data")
             .expect("write should work here");
+        append_file.flush().expect("flush should work here");
 
         let contents = std::fs::read(&file_path).expect("read should work");
-        assert_eq!(contents, b"some data");
-    }
-
-    #[test]
-    fn open_file_fails_when_it_doesnt_exist() {
-        let dir = TempDir::new().expect("temp dir creation should work");
-        let file_path = file_path(&dir, "tmp.log");
-        let append_file_res: Result<AppendOnlyFile, std::io::Error> =
-            AppendOnlyFile::open_file(&file_path);
-        assert!(matches!(append_file_res, Err(_)));
+        assert_eq!(contents, b"existing data");
     }
 }
