@@ -6,7 +6,7 @@ pub struct AppendOnlyFile {
 }
 
 impl AppendOnlyFile {
-    fn open_file(file_path: &str) -> Result<AppendOnlyFile, std::io::Error> {
+    pub fn open_file(file_path: &str) -> Result<AppendOnlyFile, std::io::Error> {
         let file: File = OpenOptions::new().append(true).open(file_path)?;
 
         Ok(AppendOnlyFile {
@@ -14,7 +14,7 @@ impl AppendOnlyFile {
         })
     }
 
-    fn create_file(file_path: &str) -> Result<AppendOnlyFile, std::io::Error> {
+    pub fn create_file(file_path: &str) -> Result<AppendOnlyFile, std::io::Error> {
         let file: File = OpenOptions::new()
             .append(true)
             .create_new(true)
@@ -27,7 +27,7 @@ impl AppendOnlyFile {
 
     // TODO: implement file sync policy!
     // TODO: Flushing on every input is kinda bad. Also, we never sync, which is also bad.
-    fn append(&mut self, data: &[u8]) -> Result<(), std::io::Error> {
+    pub fn append(&mut self, data: &[u8]) -> Result<(), std::io::Error> {
         self.buf_writer.write_all(data)?;
         self.buf_writer.flush()?;
         Ok(())
