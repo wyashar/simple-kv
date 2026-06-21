@@ -32,8 +32,8 @@ pub enum KvResponseError {
     BadFirstChar(char),
     #[error("response body was not valid UTF-8")]
     BadUtf8(#[from] Utf8Error),
-    #[error("did not find a CRLF while parsing")]
-    MissingCrlf,
+    #[error("did not find a CRLF while parsing {0}")]
+    MissingCrlf(String),
     #[error("io error parsing the response")]
     Io(#[from] std::io::Error),
     #[error("keys and values should be valid usizes")]
@@ -60,7 +60,7 @@ impl<'a> KvResponse<'a> {
 
         match prefix_buf[0] {
             OKAY_PREFIX => {
-                expect_crlf(reader)?;
+                consume_crlf(reader, "okay")?;
                 Ok(KvResponse::Okay)
             }
             ERROR_PREFIX => {
@@ -68,27 +68,16 @@ impl<'a> KvResponse<'a> {
                 reader.read_until(b'\n', &mut msg_bytes)?;
                 let msg = msg_bytes
                     .strip_suffix(CRLF)
-                    .ok_or(KvResponseError::MissingCrlf)?;
+                    .ok_or_else(|| KvResponseError::MissingCrlf("error message".to_owned()))?;
                 Ok(KvResponse::Error(std::str::from_utf8(msg)?.to_owned()))
             }
             VALUE_PREFIX => {
-                let mut val_len_bytes: Vec<u8> = Vec::new();
-                reader.read_until(b'\n', &mut val_len_bytes)?;
-
-                let val_len_bytes_trimmed = val_len_bytes
-                    .strip_suffix(CRLF)
-                    .ok_or(KvResponseError::MissingCrlf)?;
-
-                let val_len: usize = std::str::from_utf8(val_len_bytes_trimmed)?.parse()?;
-                let mut value: Vec<u8> = vec![0u8; val_len];
-                reader.read_exact(&mut value)?;
-
-                expect_crlf(reader)?;
-
+                let val_len = parse_len(reader, "value length")?;
+                let value = parse_field(reader, val_len, "value")?;
                 Ok(KvResponse::Value(Cow::Owned(value)))
             }
             NOTFOUND_PREFIX => {
-                expect_crlf(reader)?;
+                consume_crlf(reader, "not found")?;
                 Ok(KvResponse::NotFound)
             }
             other => Err(KvResponseError::BadFirstChar(other as char)),
@@ -113,13 +102,36 @@ impl<'a> KvResponse<'a> {
     }
 }
 
-fn expect_crlf<R: Read>(reader: &mut R) -> Result<(), KvResponseError> {
+fn parse_field<R: Read>(
+    reader: &mut R,
+    len: usize,
+    location: &str,
+) -> Result<Vec<u8>, KvResponseError> {
+    let mut bytes: Vec<u8> = vec![0; len];
+    reader.read_exact(&mut bytes)?;
+    consume_crlf(reader, location)?;
+    Ok(bytes)
+}
+
+fn consume_crlf<R: Read>(reader: &mut R, crlf_location: &str) -> Result<(), KvResponseError> {
     let mut buf: [u8; 2] = [0; 2];
     reader.read_exact(&mut buf)?;
     if &buf != CRLF {
-        return Err(KvResponseError::MissingCrlf);
+        return Err(KvResponseError::MissingCrlf(crlf_location.to_owned()));
     }
     Ok(())
+}
+
+fn parse_len<R: BufRead>(reader: &mut R, crlf_location: &str) -> Result<usize, KvResponseError> {
+    let mut buf: Vec<u8> = Vec::new();
+    reader.read_until(b'\n', &mut buf)?;
+
+    let bytes_trimmed = buf
+        .strip_suffix(CRLF)
+        .ok_or_else(|| KvResponseError::MissingCrlf(crlf_location.to_owned()))?;
+    let length: usize = std::str::from_utf8(bytes_trimmed)?.parse()?;
+
+    Ok(length)
 }
 
 impl fmt::Display for KvResponse<'_> {
@@ -174,7 +186,7 @@ mod tests {
     fn from_reader_missing_crlf() {
         let mut bytes: &[u8] = b"+Okay";
         let actual = KvResponse::from_reader(&mut bytes);
-        assert!(matches!(actual, Err(KvResponseError::MissingCrlf)));
+        assert!(matches!(actual, Err(KvResponseError::MissingCrlf(_))));
     }
 
     #[test]

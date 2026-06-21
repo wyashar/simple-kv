@@ -3,6 +3,15 @@ use std::io::{BufWriter, Write};
 
 pub struct AppendOnlyFile {
     buf_writer: BufWriter<File>,
+    fsync_policy: FsyncPolcy,
+}
+
+#[derive(Debug, PartialEq, strum::VariantNames, strum::EnumString)]
+#[strum(serialize_all = "PascalCase")]
+pub enum FsyncPolcy {
+    Always,
+    EverySec,
+    No,
 }
 
 impl Write for AppendOnlyFile {
@@ -18,7 +27,10 @@ impl Write for AppendOnlyFile {
 }
 
 impl AppendOnlyFile {
-    pub fn open_or_create(file_path: &str) -> Result<AppendOnlyFile, std::io::Error> {
+    pub fn open_or_create(
+        file_path: &str,
+        fsync_policy: FsyncPolcy,
+    ) -> Result<AppendOnlyFile, std::io::Error> {
         let file: File = OpenOptions::new()
             .append(true)
             .create(true)
@@ -26,6 +38,7 @@ impl AppendOnlyFile {
 
         Ok(AppendOnlyFile {
             buf_writer: BufWriter::new(file),
+            fsync_policy: fsync_policy,
         })
     }
 }
@@ -52,8 +65,10 @@ mod tests {
         let file_path = file_path(&dir, "tmp.log");
         assert!(!Path::new(&file_path).exists());
 
+        // The fsync policy is irrelevant to this test, so any variant works.
         let mut append_file: AppendOnlyFile =
-            AppendOnlyFile::open_or_create(&file_path).expect("open_or_create should work");
+            AppendOnlyFile::open_or_create(&file_path, FsyncPolcy::No)
+                .expect("open_or_create should work");
 
         assert!(Path::new(&file_path).exists());
         append_file
@@ -71,8 +86,10 @@ mod tests {
         let file_path = file_path(&dir, "tmp.log");
         std::fs::write(&file_path, b"existing ").expect("seeding the file should work");
 
+        // The fsync policy is irrelevant to this test, so any variant works.
         let mut append_file: AppendOnlyFile =
-            AppendOnlyFile::open_or_create(&file_path).expect("open_or_create should work");
+            AppendOnlyFile::open_or_create(&file_path, FsyncPolcy::No)
+                .expect("open_or_create should work");
 
         append_file
             .write_all(b"data")

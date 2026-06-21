@@ -1,10 +1,16 @@
+use strum::VariantNames;
+
+use crate::append_only_file::FsyncPolcy;
+
 pub struct Config {
     pub server_address: String,
     pub server_port: u16,
+    pub fsync_policy: FsyncPolcy,
 }
 
-const SERVER_ADDRESS_ENV: &str = "SERVER_ADDRESS";
-const SERVER_PORT_ENV: &str = "SERVER_PORT";
+const SERVER_ADDRESS_ENV: &'static str = "SERVER_ADDRESS";
+const SERVER_PORT_ENV: &'static str = "SERVER_PORT";
+const FSYNC_POLICY: &'static str = "FSYNC_POLICY";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -14,6 +20,10 @@ pub enum ConfigError {
     MissingServerPort,
     #[error("{env_var} must be a valid u16 {0:?}", env_var = SERVER_PORT_ENV)]
     InvalidPortFormat(#[from] std::num::ParseIntError),
+    #[error("{env_var} must be provided", env_var = FSYNC_POLICY)]
+    MissingFsyncPolicy,
+    #[error("{env_var} must be one of {variant_names:?}", env_var = FSYNC_POLICY, variant_names = FsyncPolcy::VARIANTS)]
+    InvalidFsyncPolicy,
 }
 
 impl Config {
@@ -25,9 +35,15 @@ impl Config {
             .map_err(|_| ConfigError::MissingServerPort)?
             .parse::<u16>()?;
 
+        let fsync_policy: FsyncPolcy = std::env::var(FSYNC_POLICY)
+            .map_err(|_| ConfigError::MissingFsyncPolicy)?
+            .parse()
+            .map_err(|_| ConfigError::InvalidFsyncPolicy)?;
+
         Ok(Self {
             server_address,
             server_port,
+            fsync_policy,
         })
     }
 }
@@ -41,6 +57,7 @@ mod tests {
         unsafe {
             std::env::remove_var(SERVER_ADDRESS_ENV);
             std::env::remove_var(SERVER_PORT_ENV);
+            std::env::remove_var(FSYNC_POLICY);
         }
     }
 
@@ -51,11 +68,13 @@ mod tests {
         unsafe {
             std::env::set_var(SERVER_ADDRESS_ENV, "127.0.0.1");
             std::env::set_var(SERVER_PORT_ENV, "8080");
+            std::env::set_var(FSYNC_POLICY, "EverySec");
         }
 
         let config = Config::from_env().unwrap();
         assert_eq!(config.server_address, "127.0.0.1");
         assert_eq!(config.server_port, 8080);
+        assert_eq!(config.fsync_policy, FsyncPolcy::EverySec);
     }
 
     #[test]
