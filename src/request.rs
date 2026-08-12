@@ -1,3 +1,5 @@
+use std::fmt;
+
 use ParseError::{
     ArrayTooLong, ComplexStringTooLong, ExpectedArray, ExpectedComplexString, MissingCrlf,
     MissingFirstByte,
@@ -14,6 +16,18 @@ const MAX_ARRAY_LENGTH: usize = 1024 * 1024;
 
 pub struct Request {
     complex_strings: Vec<Vec<u8>>,
+}
+
+impl fmt::Display for Request {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, s) in self.complex_strings.iter().enumerate() {
+            if i > 0 {
+                f.write_str(" ")?;
+            }
+            write!(f, "{}", String::from_utf8_lossy(s))?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Error, Debug)]
@@ -42,6 +56,24 @@ struct Parsed<T> {
 }
 
 impl Request {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buffer: Vec<u8> = Vec::new();
+
+        buffer.push(ARRAY_BYTE);
+        buffer.extend_from_slice(self.complex_strings.len().to_string().as_bytes());
+        buffer.extend_from_slice(CRLF);
+
+        for s in &self.complex_strings {
+            buffer.push(COMPLEX_STRING_BYTE);
+            buffer.extend_from_slice(s.len().to_string().as_bytes());
+            buffer.extend_from_slice(CRLF);
+            buffer.extend_from_slice(s);
+            buffer.extend_from_slice(CRLF);
+        }
+
+        buffer
+    }
+
     pub fn from_bytes(bytes: &[u8]) -> Result<Request, ParseError> {
         let Some(first_byte) = bytes.first() else {
             return Err(MissingFirstByte);
