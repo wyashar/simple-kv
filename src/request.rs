@@ -1,33 +1,26 @@
-use std::fmt;
-
-use ParseError::{
-    ArrayTooLong, ComplexStringTooLong, ExpectedArray, ExpectedComplexString, MissingCrlf,
-    MissingFirstByte,
-};
+use log::debug;
 use thiserror::Error;
 
-const ARRAY_BYTE: u8 = b'*';
-const COMPLEX_STRING_BYTE: u8 = b'$';
+use crate::request::ParseError::{
+    ArrayTooLong, ComplexStringTooLong, ExpectedArray, ExpectedCString, MissingCrlf,
+    MissingFirstByte,
+};
 
-const CRLF: &[u8; 2] = b"\r\n";
-
+const CRLF: &'static [u8; 2] = b"\r\n";
 const MAX_COMPLEX_STRING_LENGTH: usize = 512 * 1024 * 1024; // 512 MB
 const MAX_ARRAY_LENGTH: usize = 1024 * 1024;
+const ARRAY_BYTE: u8 = b'*';
+const CSTRING_BYTE: u8 = b'$';
 
 pub struct Request {
-    complex_strings: Vec<Vec<u8>>,
+    cstrs: Vec<Vec<u8>>,
 }
 
-impl fmt::Display for Request {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, s) in self.complex_strings.iter().enumerate() {
-            if i > 0 {
-                f.write_str(" ")?;
-            }
-            write!(f, "{}", String::from_utf8_lossy(s))?;
-        }
-        Ok(())
-    }
+pub struct RequestParser {
+    g_idx: usize,
+    arr_len: Option<usize>,
+    q_buff: Vec<u8>,
+    cs_buff: Vec<Vec<u8>>,
 }
 
 #[derive(Error, Debug)]
@@ -44,105 +37,105 @@ pub enum ParseError {
     InvalidInt(#[from] std::num::ParseIntError),
     #[error("array length {0} exceeds maximum {MAX_ARRAY_LENGTH}")]
     ArrayTooLong(usize),
-    #[error("expected bulk string ($), got byte {0:?}")]
-    ExpectedComplexString(u8),
+    #[error("expected complex string ($), got byte {0:?}")]
+    ExpectedCString(u8),
     #[error("bulk string length {0} exceeds maximum {MAX_COMPLEX_STRING_LENGTH}")]
     ComplexStringTooLong(usize),
 }
 
-struct Parsed<T> {
-    data: T,
-    num_bytes: usize,
-}
+impl RequestParser {
+    pub fn feed(&mut self, bytes: &[u8]) -> Result<Option<Request>, ParseError> {
+        self.q_buff.extend_from_slice(bytes);
 
-impl Request {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buffer: Vec<u8> = Vec::new();
+        if self.arr_len.is_none() {
+            let Some(arr_header) = Self::parse_header(&self.q_buff, ARRAY_BYTE, ExpectedArray)?
+            else {
+                debug!("array header payload is missing CRLF, waiting");
+                return Ok(None);
+            };
 
-        buffer.push(ARRAY_BYTE);
-        buffer.extend_from_slice(self.complex_strings.len().to_string().as_bytes());
-        buffer.extend_from_slice(CRLF);
+            if arr_header.data > MAX_ARRAY_LENGTH {
+                return Err(ArrayTooLong(arr_header.data));
+            }
 
-        for s in &self.complex_strings {
-            buffer.push(COMPLEX_STRING_BYTE);
-            buffer.extend_from_slice(s.len().to_string().as_bytes());
-            buffer.extend_from_slice(CRLF);
-            buffer.extend_from_slice(s);
-            buffer.extend_from_slice(CRLF);
+            self.arr_len = Some(arr_header.data);
+            self.g_idx = arr_header.num_bytes_parsed;
         }
 
-        buffer
+        while self.cs_buff.len() < self.arr_len.expect("arr_len set above") {
+            let Some(cstr) = self.parse_cstr()? else {
+                return Ok(None);
+            };
+            self.cs_buff.push(cstr);
+        }
+
+        Ok(Some(Request {
+            cstrs: self.take_request(),
+        }))
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Request, ParseError> {
-        let Some(first_byte) = bytes.first() else {
+    fn parse_cstr(&mut self) -> Result<Option<Vec<u8>>, ParseError> {
+        if self.g_idx >= self.q_buff.len() {
+            return Ok(None);
+        }
+
+        let Some(cstr_header) =
+            Self::parse_header(&self.q_buff[self.g_idx..], CSTRING_BYTE, ExpectedCString)?
+        else {
+            debug!("cstr header payload is missing CRLF, waiting");
+            return Ok(None);
+        };
+
+        let cstr_len = cstr_header.data;
+        if cstr_len > MAX_COMPLEX_STRING_LENGTH {
+            return Err(ComplexStringTooLong(cstr_len));
+        }
+
+        let data_start = self.g_idx + cstr_header.num_bytes_parsed;
+        let cstr_crlf_idx = data_start + cstr_len + 2;
+
+        if cstr_crlf_idx > self.q_buff.len() {
+            debug!("cstr payload not fully buffered yet, waiting");
+            return Ok(None);
+        }
+
+        Self::check_for_crlf(&self.q_buff[data_start + cstr_len..cstr_crlf_idx])?;
+        let cstr = self.q_buff[data_start..data_start + cstr_len].to_owned();
+
+        self.g_idx = cstr_crlf_idx;
+        Ok(Some(cstr))
+    }
+
+    fn take_request(&mut self) -> Vec<Vec<u8>> {
+        self.q_buff.drain(..self.g_idx);
+        self.g_idx = 0;
+        self.arr_len = None;
+
+        std::mem::take(&mut self.cs_buff)
+    }
+
+    fn parse_header(
+        bytes: &[u8],
+        header_byte: u8,
+        parse_error: fn(u8) -> ParseError,
+    ) -> Result<Option<Parsed<usize>>, ParseError> {
+        let Some(header) = Self::parse_line(bytes) else {
+            debug!("missing CRLF in header payload");
+            return Ok(None);
+        };
+
+        let Some(first) = header.data.first() else {
             return Err(MissingFirstByte);
         };
 
-        if *first_byte != ARRAY_BYTE {
-            return Err(ExpectedArray(*first_byte));
+        if *first != header_byte {
+            return Err(parse_error(*first));
         }
 
-        let header = Self::parse_until_crlf(&bytes[1..])?;
-        let arr_len: usize = str::from_utf8(header.data)?.parse()?;
-        let mut cursor = header.num_bytes + 1;
+        let data: usize = str::from_utf8(&header.data[1..])?.parse()?;
+        let num_bytes_parsed = header.num_bytes_parsed;
 
-        if arr_len > MAX_ARRAY_LENGTH {
-            return Err(ArrayTooLong(arr_len));
-        }
-
-        let mut complex_strings: Vec<Vec<u8>> = Vec::with_capacity(arr_len);
-
-        for _ in 0..arr_len {
-            let header = Self::parse_complex_string(&bytes[cursor..])?;
-            complex_strings.push(header.data.to_owned());
-            cursor += header.num_bytes;
-        }
-
-        Ok(Request { complex_strings })
-    }
-
-    fn parse_complex_string(bytes: &[u8]) -> Result<Parsed<&[u8]>, ParseError> {
-        let Some(first_byte) = bytes.first() else {
-            return Err(MissingFirstByte);
-        };
-
-        if *first_byte != COMPLEX_STRING_BYTE {
-            return Err(ExpectedComplexString(*first_byte));
-        }
-
-        let mut cursor = 1;
-
-        let header = Self::parse_until_crlf(&bytes[cursor..])?;
-        let str_len: usize = str::from_utf8(header.data)?.parse()?;
-        cursor += header.num_bytes;
-
-        if str_len > MAX_COMPLEX_STRING_LENGTH {
-            return Err(ComplexStringTooLong(str_len));
-        }
-
-        let data = &bytes[cursor..cursor + str_len];
-        cursor += str_len;
-
-        Self::check_for_crlf(&bytes[cursor..cursor + 2])?;
-        cursor += 2;
-
-        Ok(Parsed {
-            data,
-            num_bytes: cursor,
-        })
-    }
-
-    fn parse_until_crlf(bytes: &[u8]) -> Result<Parsed<&[u8]>, ParseError> {
-        let pos = bytes
-            .windows(2)
-            .position(|w| w == CRLF)
-            .ok_or(MissingCrlf)?;
-
-        Ok(Parsed {
-            data: &bytes[..pos],
-            num_bytes: pos + 2,
-        })
+        Ok(Some(Parsed::new(data, num_bytes_parsed)))
     }
 
     fn check_for_crlf(bytes: &[u8]) -> Result<(), ParseError> {
@@ -151,5 +144,27 @@ impl Request {
         }
 
         Ok(())
+    }
+
+    fn parse_line(bytes: &[u8]) -> Option<Parsed<&[u8]>> {
+        let crlf_pos = bytes.windows(2).position(|w| w == CRLF)?;
+        let data = &bytes[..crlf_pos];
+        let num_bytes_parsed = crlf_pos + 2;
+
+        Some(Parsed::new(data, num_bytes_parsed))
+    }
+}
+
+struct Parsed<T> {
+    data: T,
+    num_bytes_parsed: usize,
+}
+
+impl<T> Parsed<T> {
+    pub fn new(data: T, num_bytes_parsed: usize) -> Parsed<T> {
+        Parsed {
+            data,
+            num_bytes_parsed,
+        }
     }
 }
