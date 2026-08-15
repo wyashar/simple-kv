@@ -7,8 +7,8 @@ use crate::request::ParseError::{
     ArrayTooLong, CStringTooLong, ExpectedArray, ExpectedCString, MissingCrlf, MissingFirstByte,
     Poisoned,
 };
+use crate::util::{CRLF, Parsed, parse_line};
 
-const CRLF: &'static [u8; 2] = b"\r\n";
 const MAX_COMPLEX_STRING_LENGTH: usize = 512 * 1024 * 1024; // 512 MB
 const MAX_ARRAY_LENGTH: usize = 1024 * 1024;
 const ARRAY_BYTE: u8 = b'*';
@@ -67,15 +67,17 @@ impl RequestParser {
         self.q_buff.extend_from_slice(bytes);
 
         if self.arr_len.is_none() {
-            let Some(arr_header) = Self::parse_header(&self.q_buff, ARRAY_BYTE, ExpectedArray)?
+            let Some(arr_header) = Self::parse_header(
+                &self.q_buff,
+                ARRAY_BYTE,
+                MAX_ARRAY_LENGTH,
+                ExpectedArray,
+                ArrayTooLong,
+            )?
             else {
                 debug!("array header payload is missing CRLF, waiting");
                 return Ok(None);
             };
-
-            if arr_header.data > MAX_ARRAY_LENGTH {
-                return Err(ArrayTooLong(arr_header.data));
-            }
 
             self.arr_len = Some(arr_header.data);
             self.g_idx = arr_header.num_bytes_parsed;
@@ -98,18 +100,19 @@ impl RequestParser {
             return Ok(None);
         }
 
-        let Some(cstr_header) =
-            Self::parse_header(&self.q_buff[self.g_idx..], CSTRING_BYTE, ExpectedCString)?
+        let Some(cstr_header) = Self::parse_header(
+            &self.q_buff[self.g_idx..],
+            CSTRING_BYTE,
+            MAX_COMPLEX_STRING_LENGTH,
+            ExpectedCString,
+            CStringTooLong,
+        )?
         else {
             debug!("cstr header payload is missing CRLF, waiting");
             return Ok(None);
         };
 
         let cstr_len = cstr_header.data;
-        if cstr_len > MAX_COMPLEX_STRING_LENGTH {
-            return Err(CStringTooLong(cstr_len));
-        }
-
         let data_start = self.g_idx + cstr_header.num_bytes_parsed;
         let cstr_crlf_idx = data_start + cstr_len + 2;
 
@@ -139,9 +142,11 @@ impl RequestParser {
     fn parse_header(
         bytes: &[u8],
         header_byte: u8,
-        parse_error: fn(u8) -> ParseError,
+        max_header_len: usize,
+        expected_error: fn(u8) -> ParseError,
+        too_long_error: fn(usize) -> ParseError,
     ) -> Result<Option<Parsed<usize>>, ParseError> {
-        let Some(header) = Self::parse_line(bytes) else {
+        let Some(header) = parse_line(bytes) else {
             debug!("missing CRLF in header payload");
             return Ok(None);
         };
@@ -151,21 +156,15 @@ impl RequestParser {
         };
 
         if *first != header_byte {
-            return Err(parse_error(*first));
+            return Err(expected_error(*first));
         }
 
-        let data: usize = str::from_utf8(&header.data[1..])?.parse()?;
-        let num_bytes_parsed = header.num_bytes_parsed;
+        let header_len: usize = str::from_utf8(&header.data[1..])?.parse()?;
+        if header_len > max_header_len {
+            return Err(too_long_error(header_len));
+        }
 
-        Ok(Some(Parsed::new(data, num_bytes_parsed)))
-    }
-
-    fn parse_line(bytes: &[u8]) -> Option<Parsed<&[u8]>> {
-        let crlf_pos = bytes.windows(2).position(|w| w == CRLF)?;
-        let data = &bytes[..crlf_pos];
-        let num_bytes_parsed = crlf_pos + 2;
-
-        Some(Parsed::new(data, num_bytes_parsed))
+        Ok(Some(Parsed::new(header_len, header.num_bytes_parsed)))
     }
 }
 
@@ -199,19 +198,16 @@ impl Request {
 
         buf
     }
+
+    pub fn into_args(self) -> Vec<Vec<u8>> {
+        self.cstrs
+    }
 }
 
-struct Parsed<T> {
-    data: T,
-    num_bytes_parsed: usize,
-}
-
-impl<T> Parsed<T> {
-    pub fn new(data: T, num_bytes_parsed: usize) -> Parsed<T> {
-        Parsed {
-            data,
-            num_bytes_parsed,
-        }
+#[cfg(test)]
+impl Request {
+    pub fn from_args(cstrs: Vec<Vec<u8>>) -> Request {
+        Request { cstrs }
     }
 }
 
