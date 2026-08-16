@@ -1,6 +1,7 @@
 mod command;
 mod config;
 mod request;
+mod response;
 mod server;
 mod util;
 

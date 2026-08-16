@@ -7,12 +7,10 @@ use crate::request::ParseError::{
     ArrayTooLong, CStringTooLong, ExpectedArray, ExpectedCString, MissingCrlf, MissingFirstByte,
     Poisoned,
 };
-use crate::util::{CRLF, Parsed, parse_line};
+use crate::util::{CRLF, CSTRING_BYTE, MAX_COMPLEX_STRING_LENGTH, Parsed, parse_line};
 
-const MAX_COMPLEX_STRING_LENGTH: usize = 512 * 1024 * 1024; // 512 MB
 const MAX_ARRAY_LENGTH: usize = 1024 * 1024;
 const ARRAY_BYTE: u8 = b'*';
-const CSTRING_BYTE: u8 = b'$';
 
 #[derive(Debug)]
 pub struct Request {
