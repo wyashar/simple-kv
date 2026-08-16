@@ -51,21 +51,23 @@ pub enum ParseError {
 }
 
 impl RequestParser {
-    pub fn feed(&mut self, bytes: &[u8]) -> Result<Option<Request>, ParseError> {
+    pub fn push_bytes(&mut self, bytes: &[u8]) {
+        self.q_buff.extend_from_slice(bytes);
+    }
+
+    pub fn parse_next(&mut self) -> Result<Option<Request>, ParseError> {
         if self.poisoned {
             return Err(Poisoned);
         }
 
-        let result = self.feed_internal(bytes);
+        let result = self.parse_next_internal();
         if result.is_err() {
             self.poisoned = true;
         }
         result
     }
 
-    fn feed_internal(&mut self, bytes: &[u8]) -> Result<Option<Request>, ParseError> {
-        self.q_buff.extend_from_slice(bytes);
-
+    fn parse_next_internal(&mut self) -> Result<Option<Request>, ParseError> {
         if self.arr_len.is_none() {
             let Some(arr_header) = Self::parse_header(
                 &self.q_buff,
@@ -215,12 +217,19 @@ impl Request {
 mod tests {
     use super::*;
 
-    /// Assert that feeding `input` yields a complete request whose bulk strings
+    fn push_parse(
+        parser: &mut RequestParser,
+        bytes: &[u8],
+    ) -> Result<Option<Request>, ParseError> {
+        parser.push_bytes(bytes);
+        parser.parse_next()
+    }
+
+    /// Assert that parsing `input` yields a complete request whose bulk strings
     /// match `expected`.
     fn assert_parses(input: &[u8], expected: Vec<Vec<u8>>) {
         let mut parser = RequestParser::default();
-        let request = parser
-            .feed(input)
+        let request = push_parse(&mut parser, input)
             .expect("parse should succeed")
             .expect("request should be complete");
 
@@ -255,8 +264,7 @@ mod tests {
     /// bytes we started with.
     fn assert_round_trips(input: &[u8]) {
         let mut parser = RequestParser::default();
-        let request = parser
-            .feed(input)
+        let request = push_parse(&mut parser, input)
             .expect("parse should succeed")
             .expect("request should be complete");
 
@@ -278,10 +286,10 @@ mod tests {
         assert_round_trips(b"*2\r\n$3\r\nDEL\r\n$5\r\nMyKey\r\n");
     }
 
-    /// Feed `input` and return the parse error it produces.
+    /// Parse `input` and return the parse error it produces.
     fn parse_error(input: &[u8]) -> ParseError {
         let mut parser = RequestParser::default();
-        parser.feed(input).expect_err("parse should fail")
+        push_parse(&mut parser, input).expect_err("parse should fail")
     }
 
     #[test]
@@ -308,10 +316,10 @@ mod tests {
         assert!(matches!(err, ParseError::MissingFirstByte));
     }
 
-    /// Feed `input` and assert the parser reports "need more bytes" (incomplete).
+    /// Push `input` and assert the parser reports "need more bytes" (incomplete).
     fn assert_incomplete(input: &[u8]) {
         let mut parser = RequestParser::default();
-        let result = parser.feed(input).expect("parse should not error");
+        let result = push_parse(&mut parser, input).expect("parse should not error");
         assert!(result.is_none(), "expected incomplete, got a full request");
     }
 
@@ -344,23 +352,30 @@ mod tests {
         let mut parser = RequestParser::default();
 
         // No CRLF at all yet.
-        assert!(parser.feed(b"*2").expect("no error").is_none());
+        assert!(push_parse(&mut parser, b"*2").expect("no error").is_none());
         // Ends in a lone '\r' — still not a full CRLF.
-        assert!(parser.feed(b"\r").expect("no error").is_none());
+        assert!(push_parse(&mut parser, b"\r").expect("no error").is_none());
         // CRLF now complete, but there are no bulk strings yet.
-        assert!(parser.feed(b"\n").expect("no error").is_none());
+        assert!(push_parse(&mut parser, b"\n").expect("no error").is_none());
     }
 
     #[test]
     fn completes_request_fed_in_chunks() {
         let mut parser = RequestParser::default();
 
-        assert!(parser.feed(b"*2\r\n").expect("no error").is_none());
-        assert!(parser.feed(b"$3\r\nGET").expect("no error").is_none());
-        assert!(parser.feed(b"\r\n$5\r\nMYKE").expect("no error").is_none());
+        assert!(push_parse(&mut parser, b"*2\r\n").expect("no error").is_none());
+        assert!(
+            push_parse(&mut parser, b"$3\r\nGET")
+                .expect("no error")
+                .is_none()
+        );
+        assert!(
+            push_parse(&mut parser, b"\r\n$5\r\nMYKE")
+                .expect("no error")
+                .is_none()
+        );
 
-        let request = parser
-            .feed(b"Y\r\n")
+        let request = push_parse(&mut parser, b"Y\r\n")
             .expect("no error")
             .expect("request should now be complete");
 
@@ -395,7 +410,7 @@ mod tests {
         let mut parser = RequestParser::default();
 
         // "*5\r" — no full CRLF yet, so the array header can't be committed.
-        let result = parser.feed(b"*5\r").expect("no error");
+        let result = push_parse(&mut parser, b"*5\r").expect("no error");
 
         assert!(result.is_none());
         assert_eq!(parser.arr_len, None);
@@ -408,14 +423,14 @@ mod tests {
     fn parser_is_poisoned_after_an_error() {
         let mut parser = RequestParser::default();
 
-        let err = parser
-            .feed(b"&2\r\n$3\r\nGET\r\n")
+        let err = push_parse(&mut parser, b"&2\r\n$3\r\nGET\r\n")
             .expect_err("bad array byte should error");
         assert!(matches!(err, ParseError::ExpectedArray(b'&')));
 
         // Even a perfectly valid request is rejected after the parser is poisoned.
+        parser.push_bytes(b"*1\r\n$4\r\nPING\r\n");
         let err = parser
-            .feed(b"*1\r\n$4\r\nPING\r\n")
+            .parse_next()
             .expect_err("poisoned parser should reject further input");
         assert!(matches!(err, ParseError::Poisoned));
     }
@@ -425,7 +440,7 @@ mod tests {
         let mut parser = RequestParser::default();
 
         // "*5\r\n" — a complete array header, but no bulk strings yet.
-        let result = parser.feed(b"*5\r\n").expect("no error");
+        let result = push_parse(&mut parser, b"*5\r\n").expect("no error");
 
         assert!(result.is_none());
         assert_eq!(parser.arr_len, Some(5));
@@ -439,8 +454,7 @@ mod tests {
         let mut parser = RequestParser::default();
 
         // Array header is fine, but the first bulk string uses '&' not '$'.
-        let err = parser
-            .feed(b"*2\r\n&3\r\nGET\r\n")
+        let err = push_parse(&mut parser, b"*2\r\n&3\r\nGET\r\n")
             .expect_err("bad cstr byte should error");
 
         assert!(matches!(err, ParseError::ExpectedCString(b'&')));
@@ -455,8 +469,7 @@ mod tests {
         let mut parser = RequestParser::default();
 
         // "$3" then "GET" is fine, but the payload is terminated by "XX".
-        let err = parser
-            .feed(b"*1\r\n$3\r\nGETXX")
+        let err = push_parse(&mut parser, b"*1\r\n$3\r\nGETXX")
             .expect_err("bad cstr terminator should error");
 
         assert!(matches!(err, ParseError::MissingCrlf));
@@ -471,8 +484,7 @@ mod tests {
         let mut parser = RequestParser::default();
 
         // First bulk string "GET" parses cleanly; the second uses '&' not '$'.
-        let err = parser
-            .feed(b"*2\r\n$3\r\nGET\r\n&5\r\nMYKEY\r\n")
+        let err = push_parse(&mut parser, b"*2\r\n$3\r\nGET\r\n&5\r\nMYKEY\r\n")
             .expect_err("bad second cstr byte should error");
 
         assert!(matches!(err, ParseError::ExpectedCString(b'&')));
@@ -480,5 +492,30 @@ mod tests {
         assert_eq!(parser.arr_len, Some(2));
         assert_eq!(parser.g_idx, 13); // advanced past "*2\r\n$3\r\nGET\r\n"
         assert_eq!(parser.cs_buff, vec![b"GET".to_vec()]); // first string committed
+    }
+
+    #[test]
+    fn parse_next_yields_second_request_without_more_bytes() {
+        let mut parser = RequestParser::default();
+        parser.push_bytes(
+            b"*2\r\n$3\r\nGET\r\n$1\r\na\r\n*2\r\n$3\r\nGET\r\n$1\r\nb\r\n",
+        );
+
+        let first = parser
+            .parse_next()
+            .expect("no error")
+            .expect("first request should be complete");
+        assert_eq!(first.cstrs, vec![b"GET".to_vec(), b"a".to_vec()]);
+
+        let second = parser
+            .parse_next()
+            .expect("no error")
+            .expect("second request should already be buffered");
+        assert_eq!(second.cstrs, vec![b"GET".to_vec(), b"b".to_vec()]);
+
+        assert!(
+            parser.parse_next().expect("no error").is_none(),
+            "no third request"
+        );
     }
 }
