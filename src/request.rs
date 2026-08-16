@@ -30,7 +30,7 @@ pub struct RequestParser {
 pub enum ParseError {
     #[error("request was empty; no first byte present")]
     MissingFirstByte,
-    #[error("expected top-level array (*), got byte {0:?}")]
+    #[error("expected top-level array (*), got {ch:?}", ch = *.0 as char)]
     ExpectedArray(u8),
     #[error("expected crlf")]
     MissingCrlf,
@@ -40,7 +40,7 @@ pub enum ParseError {
     InvalidInt(#[from] std::num::ParseIntError),
     #[error("array length {0} exceeds maximum {MAX_ARRAY_LENGTH}")]
     ArrayTooLong(usize),
-    #[error("expected complex string ($), got byte {0:?}")]
+    #[error("expected complex string ($), got {ch:?}", ch = *.0 as char)]
     ExpectedCString(u8),
     #[error("bulk string length {0} exceeds maximum {MAX_COMPLEX_STRING_LENGTH}")]
     CStringTooLong(usize),

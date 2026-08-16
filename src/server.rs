@@ -1,10 +1,11 @@
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 
 use log::{info, warn};
 
 use crate::command::Command;
-use crate::request::{ParseError, Request, RequestParser};
+use crate::request::RequestParser;
+use crate::response::Response;
 
 const READ_BUF_SIZE: usize = 8 * 1024;
 
@@ -49,15 +50,29 @@ fn handle_connection(mut stream: TcpStream, peer: SocketAddr) {
         loop {
             match parser.parse_next() {
                 Ok(Some(request)) => match Command::try_from(request) {
-                    Ok(command) => info!("received command from {peer}: {command}"),
-                    Err(e) => warn!("invalid command from {peer}: {e}"),
+                    Ok(command) => {
+                        info!("received command from {peer}: {command}");
+                        send_response(&mut stream, Response::Ok);
+                    }
+                    Err(e) => {
+                        warn!("invalid command from {peer}: {e}");
+                        send_response(&mut stream, Response::Error(e.to_string()));
+                    }
                 },
                 Ok(None) => break,
                 Err(e) => {
                     warn!("failed to parse request from {peer}: {e}");
+                    send_response(&mut stream, Response::Error(e.to_string()));
                     return;
                 }
             }
         }
+    }
+}
+
+fn send_response(stream: &mut TcpStream, response: Response) {
+    match stream.write_all(&response.to_bytes()) {
+        Ok(()) => info!("sent response: {response}"),
+        Err(e) => warn!("failed to send response: {e}"),
     }
 }

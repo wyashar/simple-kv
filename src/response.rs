@@ -1,3 +1,5 @@
+use std::fmt;
+
 use log::debug;
 use thiserror::Error;
 
@@ -12,6 +14,7 @@ const ERROR_BYTE: u8 = b'-';
 const INTEGER_BYTE: u8 = b':';
 const NULL_CSTR_LEN: i64 = -1;
 const OK_BODY: &[u8] = b"OK";
+const PREFIX_BYTES: [u8; 4] = [SSTR_BYTE, ERROR_BYTE, CSTRING_BYTE, INTEGER_BYTE];
 
 #[derive(Debug, PartialEq)]
 pub enum Response {
@@ -20,6 +23,46 @@ pub enum Response {
     Cstr(Vec<u8>),
     Null,
     Integer(i64),
+}
+
+impl Response {
+    pub fn prefix_byte(&self) -> u8 {
+        match self {
+            Self::Ok => SSTR_BYTE,
+            Self::Error(_) => ERROR_BYTE,
+            Self::Cstr(_) | Self::Null => CSTRING_BYTE,
+            Self::Integer(_) => INTEGER_BYTE,
+        }
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = vec![self.prefix_byte()];
+        match self {
+            Self::Ok => buf.extend_from_slice(OK_BODY),
+            Self::Error(msg) => buf.extend_from_slice(msg.as_bytes()),
+            Self::Cstr(bytes) => {
+                buf.extend_from_slice(bytes.len().to_string().as_bytes());
+                buf.extend_from_slice(CRLF);
+                buf.extend_from_slice(bytes);
+            }
+            Self::Null => buf.extend_from_slice(b"-1"),
+            Self::Integer(n) => buf.extend_from_slice(n.to_string().as_bytes()),
+        }
+        buf.extend_from_slice(CRLF);
+        buf
+    }
+}
+
+impl fmt::Display for Response {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ok => f.write_str("OK"),
+            Self::Error(msg) => write!(f, "{msg}"),
+            Self::Cstr(bytes) => write!(f, "{}", String::from_utf8_lossy(bytes)),
+            Self::Null => f.write_str("(nil)"),
+            Self::Integer(n) => write!(f, "{n}"),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -36,7 +79,7 @@ pub enum ParseError {
     InvalidUtf8(#[from] std::str::Utf8Error),
     #[error("invalid integer in payload")]
     InvalidInt(#[from] std::num::ParseIntError),
-    #[error("unexpected response prefix byte {0:?}")]
+    #[error("unexpected response prefix byte, expected one of {prefixes:?}, but got: {got:?}", prefixes = PREFIX_BYTES, got = *.0 as char)]
     UnexpectedPrefix(u8),
     #[error("expected sstr OK, got {0:?}")]
     UnexpectedSstr(String),
@@ -346,5 +389,45 @@ mod tests {
             .parse_next()
             .expect_err("poisoned parser should reject further input");
         assert!(matches!(err, ParseError::Poisoned));
+    }
+
+    fn assert_round_trips(response: Response) {
+        let mut parser = ResponseParser::default();
+        parser.push_bytes(&response.to_bytes());
+        let parsed = parser
+            .parse_next()
+            .expect("serialized response should be valid RESP")
+            .expect("serialized response should be complete");
+        assert_eq!(parsed, response);
+    }
+
+    #[test]
+    fn round_trips_ok() {
+        assert_round_trips(Response::Ok);
+    }
+
+    #[test]
+    fn round_trips_error() {
+        assert_round_trips(Response::Error("ERR unknown command".to_owned()));
+    }
+
+    #[test]
+    fn round_trips_cstr() {
+        assert_round_trips(Response::Cstr(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn round_trips_empty_cstr() {
+        assert_round_trips(Response::Cstr(vec![]));
+    }
+
+    #[test]
+    fn round_trips_null() {
+        assert_round_trips(Response::Null);
+    }
+
+    #[test]
+    fn round_trips_integer() {
+        assert_round_trips(Response::Integer(2));
     }
 }
