@@ -1,11 +1,5 @@
-mod command;
-mod config;
-mod request;
-mod response;
-mod server;
-mod util;
-
-use config::Config;
+use simple_kv::config::Config;
+use simple_kv::server;
 
 fn main() {
     env_logger::init();

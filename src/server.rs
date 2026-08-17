@@ -11,6 +11,13 @@ const READ_BUF_SIZE: usize = 8 * 1024;
 
 pub fn run(addr: &str) {
     let listener = TcpListener::bind(addr).expect("failed to bind to address");
+    serve(listener);
+}
+
+pub fn serve(listener: TcpListener) {
+    let addr = listener
+        .local_addr()
+        .expect("failed to read bound address");
     info!("listening on {addr}");
 
     for stream in listener.incoming() {
