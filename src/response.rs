@@ -16,15 +16,15 @@ const OK_BODY: &[u8] = b"OK";
 const PREFIX_BYTES: [u8; 4] = [SSTR_BYTE, ERROR_BYTE, CSTRING_BYTE, INTEGER_BYTE];
 
 #[derive(Debug, PartialEq)]
-pub enum Response {
+pub enum Response<T = Bytes> {
     Ok,
     Error(String),
-    Cstr(Bytes),
+    Cstr(T),
     Null,
     Integer(i64),
 }
 
-impl Response {
+impl<B: AsRef<[u8]>> Response<B> {
     pub fn prefix_byte(&self) -> u8 {
         match self {
             Self::Ok => SSTR_BYTE,
@@ -40,6 +40,7 @@ impl Response {
             Self::Ok => buf.extend_from_slice(OK_BODY),
             Self::Error(msg) => buf.extend_from_slice(msg.as_bytes()),
             Self::Cstr(bytes) => {
+                let bytes = bytes.as_ref();
                 buf.extend_from_slice(bytes.len().to_string().as_bytes());
                 buf.extend_from_slice(CRLF);
                 buf.extend_from_slice(bytes);
@@ -52,12 +53,12 @@ impl Response {
     }
 }
 
-impl fmt::Display for Response {
+impl<B: AsRef<[u8]>> fmt::Display for Response<B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ok => f.write_str("OK"),
             Self::Error(msg) => write!(f, "{msg}"),
-            Self::Cstr(bytes) => write!(f, "{}", String::from_utf8_lossy(bytes)),
+            Self::Cstr(bytes) => write!(f, "{}", String::from_utf8_lossy(bytes.as_ref())),
             Self::Null => f.write_str("(nil)"),
             Self::Integer(n) => write!(f, "{n}"),
         }

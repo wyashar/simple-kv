@@ -82,11 +82,14 @@ fn handle_connection(
     }
 }
 
-fn apply_command(command: Command, key_store: &mut KeyStore<Bytes, Bytes>) -> Response {
+fn apply_command(
+    command: Command,
+    key_store: &mut KeyStore<Bytes, Bytes>,
+) -> Response<&[u8]> {
     match command {
         Command::Get(key) => key_store
             .get(&key)
-            .map_or_else(|| Response::Null, |value| Response::Cstr(value.clone())),
+            .map_or_else(|| Response::Null, |value| Response::Cstr(value.as_slice())),
         Command::Set(key, value) => {
             key_store.insert(key, value);
             Response::Ok
@@ -98,7 +101,7 @@ fn apply_command(command: Command, key_store: &mut KeyStore<Bytes, Bytes>) -> Re
     }
 }
 
-fn send_response(stream: &mut TcpStream, response: Response) {
+fn send_response(stream: &mut TcpStream, response: Response<&[u8]>) {
     match stream.write_all(&response.to_bytes()) {
         Ok(()) => info!("sent response: {response}"),
         Err(e) => warn!("failed to send response: {e}"),
