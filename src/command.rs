@@ -39,6 +39,14 @@ impl Command {
         }
     }
 
+    pub fn is_get(&self) -> bool {
+        self.name() == GET_STR
+    }
+
+    pub fn is_write(&self) -> bool {
+        self.name() == SET_STR || self.name() == DEL_STR
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut parts: Vec<&[u8]> = vec![self.name().as_bytes()];
         match self {
@@ -230,5 +238,17 @@ mod tests {
     #[test]
     fn round_trips_del() {
         assert_round_trips(Command::Del(vec![b"k1".to_vec(), b"k2".to_vec()]));
+    }
+
+    #[test]
+    fn classifies_read_and_write_commands() {
+        assert!(Command::Get(b"k".to_vec()).is_get());
+        assert!(!Command::Get(b"k".to_vec()).is_write());
+
+        assert!(!Command::Set(b"k".to_vec(), b"v".to_vec()).is_get());
+        assert!(Command::Set(b"k".to_vec(), b"v".to_vec()).is_write());
+
+        assert!(!Command::Del(vec![b"k".to_vec()]).is_get());
+        assert!(Command::Del(vec![b"k".to_vec()]).is_write());
     }
 }
