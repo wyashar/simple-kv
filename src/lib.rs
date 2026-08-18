@@ -5,3 +5,5 @@ pub mod request;
 pub mod response;
 pub mod server;
 pub(crate) mod util;
+
+pub use util::Bytes;

@@ -264,8 +264,7 @@ mod tests {
 
     #[test]
     fn del_removes_value_and_preserves_probe_cluster() {
-        let mut store =
-            KeyStore::with_hasher(BuildHasherDefault::<ConstantHasher>::default());
+        let mut store = KeyStore::with_hasher(BuildHasherDefault::<ConstantHasher>::default());
         store.insert("first", 1);
         store.insert("middle", 2);
         store.insert("last", 3);
@@ -280,8 +279,7 @@ mod tests {
 
     #[test]
     fn del_removes_head_of_probe_cluster() {
-        let mut store =
-            KeyStore::with_hasher(BuildHasherDefault::<ConstantHasher>::default());
+        let mut store = KeyStore::with_hasher(BuildHasherDefault::<ConstantHasher>::default());
         store.insert("first", 1);
         store.insert("middle", 2);
         store.insert("last", 3);
@@ -303,8 +301,7 @@ mod tests {
 
     #[test]
     fn del_removes_tail_of_probe_cluster() {
-        let mut store =
-            KeyStore::with_hasher(BuildHasherDefault::<ConstantHasher>::default());
+        let mut store = KeyStore::with_hasher(BuildHasherDefault::<ConstantHasher>::default());
         store.insert("first", 1);
         store.insert("middle", 2);
         store.insert("last", 3);
@@ -319,8 +316,7 @@ mod tests {
 
     #[test]
     fn deletion_stops_at_entry_in_its_ideal_bucket() {
-        let mut store =
-            KeyStore::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
+        let mut store = KeyStore::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
         store.insert(0_u64, "before");
         store.insert(1_u64, "start");
         store.insert(17_u64, "displaced");
@@ -357,8 +353,7 @@ mod tests {
 
     #[test]
     fn multiple_resizes_preserve_colliding_entries() {
-        let mut store =
-            KeyStore::with_hasher(BuildHasherDefault::<ConstantHasher>::default());
+        let mut store = KeyStore::with_hasher(BuildHasherDefault::<ConstantHasher>::default());
 
         for key in 0..100 {
             store.insert(key, key * 10);
@@ -373,8 +368,7 @@ mod tests {
 
     #[test]
     fn deletion_after_resize_preserves_remaining_entries() {
-        let mut store =
-            KeyStore::with_hasher(BuildHasherDefault::<ConstantHasher>::default());
+        let mut store = KeyStore::with_hasher(BuildHasherDefault::<ConstantHasher>::default());
         for key in 0..20 {
             store.insert(key, key * 10);
         }
@@ -395,8 +389,7 @@ mod tests {
 
     #[test]
     fn insertion_reuses_space_after_deletion() {
-        let mut store =
-            KeyStore::with_hasher(BuildHasherDefault::<ConstantHasher>::default());
+        let mut store = KeyStore::with_hasher(BuildHasherDefault::<ConstantHasher>::default());
         store.insert("first", 1);
         store.insert("removed", 2);
         store.insert("last", 3);
@@ -413,8 +406,7 @@ mod tests {
 
     #[test]
     fn insertion_uses_robin_hood_swapping_for_mixed_hashes() {
-        let mut store =
-            KeyStore::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
+        let mut store = KeyStore::with_hasher(BuildHasherDefault::<IdentityHasher>::default());
         store.insert(1_u64, "first");
         store.insert(2_u64, "second");
         store.insert(17_u64, "displaced");
@@ -438,8 +430,7 @@ mod tests {
 
     #[test]
     fn deletion_preserves_a_cluster_that_wraps_around() {
-        let mut store =
-            KeyStore::with_hasher(BuildHasherDefault::<WraparoundHasher>::default());
+        let mut store = KeyStore::with_hasher(BuildHasherDefault::<WraparoundHasher>::default());
         store.insert("first", 1);
         store.insert("middle", 2);
         store.insert("last", 3);

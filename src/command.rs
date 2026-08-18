@@ -4,6 +4,7 @@ use thiserror::Error;
 
 use crate::command::CommandError::{TooFewArguments, TooManyArguments, UnrecognizedCommand};
 use crate::request::Request;
+use crate::util::Bytes;
 
 const GET_STR: &'static str = "GET";
 const SET_STR: &'static str = "SET";
@@ -12,9 +13,9 @@ const COMMAND_NAMES: [&'static str; 3] = [GET_STR, SET_STR, DEL_STR];
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
-    Get(Vec<u8>),
-    Set(Vec<u8>, Vec<u8>),
-    Del(Vec<Vec<u8>>),
+    Get(Bytes),
+    Set(Bytes, Bytes),
+    Del(Vec<Bytes>),
 }
 
 #[derive(Error, Debug)]
@@ -46,7 +47,7 @@ impl Command {
                 parts.push(key);
                 parts.push(value);
             }
-            Self::Del(keys) => parts.extend(keys.iter().map(Vec::as_slice)),
+            Self::Del(keys) => parts.extend(keys.iter().map(Bytes::as_slice)),
         }
 
         let mut buf = format!("*{}\r\n", parts.len()).into_bytes();

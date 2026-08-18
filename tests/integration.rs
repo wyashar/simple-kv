@@ -75,11 +75,18 @@ fn deserialize_response(stream: &mut TcpStream) -> Response {
 }
 
 #[test]
-fn get_returns_ok() {
+fn get_returns_cstr() {
     let addr = spawn_server();
+    let key = b"mykey".to_vec();
+    let value = b"myval".to_vec();
+
     assert_eq!(
-        send_request(addr, &Command::Get(b"mykey".to_vec())),
+        send_request(addr, &Command::Set(key.clone(), value.clone())),
         Response::Ok
+    );
+    assert_eq!(
+        send_request(addr, &Command::Get(key)),
+        Response::Cstr(value)
     );
 }
 
@@ -93,11 +100,19 @@ fn set_returns_ok() {
 }
 
 #[test]
-fn del_returns_ok() {
+fn del_returns_integer() {
     let addr = spawn_server();
     assert_eq!(
-        send_request(addr, &Command::Del(vec![b"k1".to_vec(), b"k2".to_vec()])),
+        send_request(addr, &Command::Set(b"k1".to_vec(), b"v1".to_vec())),
         Response::Ok
+    );
+    assert_eq!(
+        send_request(addr, &Command::Set(b"k2".to_vec(), b"v2".to_vec())),
+        Response::Ok
+    );
+    assert_eq!(
+        send_request(addr, &Command::Del(vec![b"k1".to_vec(), b"k2".to_vec()])),
+        Response::Integer(2)
     );
 }
 

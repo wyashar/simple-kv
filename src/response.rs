@@ -4,10 +4,9 @@ use log::debug;
 use thiserror::Error;
 
 use crate::response::ParseError::{
-    CStringTooLong, InvalidCStringLength, MissingCrlf, Poisoned, UnexpectedPrefix,
-    UnexpectedSstr,
+    CStringTooLong, InvalidCStringLength, MissingCrlf, Poisoned, UnexpectedPrefix, UnexpectedSstr,
 };
-use crate::util::{CRLF, CSTRING_BYTE, MAX_COMPLEX_STRING_LENGTH, parse_line};
+use crate::util::{parse_line, Bytes, CRLF, CSTRING_BYTE, MAX_COMPLEX_STRING_LENGTH};
 
 const SSTR_BYTE: u8 = b'+';
 const ERROR_BYTE: u8 = b'-';
@@ -20,7 +19,7 @@ const PREFIX_BYTES: [u8; 4] = [SSTR_BYTE, ERROR_BYTE, CSTRING_BYTE, INTEGER_BYTE
 pub enum Response {
     Ok,
     Error(String),
-    Cstr(Vec<u8>),
+    Cstr(Bytes),
     Null,
     Integer(i64),
 }
@@ -318,7 +317,9 @@ mod tests {
     fn completes_cstr_fed_in_chunks() {
         let mut parser = ResponseParser::default();
 
-        assert!(push_parse(&mut parser, b"$5\r\n").expect("no error").is_none());
+        assert!(push_parse(&mut parser, b"$5\r\n")
+            .expect("no error")
+            .is_none());
         assert!(push_parse(&mut parser, b"hel").expect("no error").is_none());
 
         let response = push_parse(&mut parser, b"lo\r\n")
@@ -333,14 +334,8 @@ mod tests {
         let mut parser = ResponseParser::default();
         parser.push_bytes(b"+OK\r\n:1\r\n");
 
-        assert_eq!(
-            parser.parse_next().unwrap(),
-            Some(Response::Ok)
-        );
-        assert_eq!(
-            parser.parse_next().unwrap(),
-            Some(Response::Integer(1))
-        );
+        assert_eq!(parser.parse_next().unwrap(), Some(Response::Ok));
+        assert_eq!(parser.parse_next().unwrap(), Some(Response::Integer(1)));
         assert!(parser.parse_next().unwrap().is_none());
     }
 

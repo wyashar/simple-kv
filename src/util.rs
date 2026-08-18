@@ -1,3 +1,5 @@
+pub type Bytes = Vec<u8>;
+
 pub const CRLF: &[u8; 2] = b"\r\n";
 pub const CSTRING_BYTE: u8 = b'$';
 pub const MAX_COMPLEX_STRING_LENGTH: usize = 512 * 1024 * 1024; // 512 MB

@@ -7,14 +7,14 @@ use crate::request::ParseError::{
     ArrayTooLong, CStringTooLong, ExpectedArray, ExpectedCString, MissingCrlf, MissingFirstByte,
     Poisoned,
 };
-use crate::util::{CRLF, CSTRING_BYTE, MAX_COMPLEX_STRING_LENGTH, Parsed, parse_line};
+use crate::util::{parse_line, Bytes, Parsed, CRLF, CSTRING_BYTE, MAX_COMPLEX_STRING_LENGTH};
 
 const MAX_ARRAY_LENGTH: usize = 1024 * 1024;
 const ARRAY_BYTE: u8 = b'*';
 
 #[derive(Debug)]
 pub struct Request {
-    cstrs: Vec<Vec<u8>>,
+    cstrs: Vec<Bytes>,
 }
 
 #[derive(Default)]
@@ -22,7 +22,7 @@ pub struct RequestParser {
     g_idx: usize,
     arr_len: Option<usize>,
     q_buff: Vec<u8>,
-    cs_buff: Vec<Vec<u8>>,
+    cs_buff: Vec<Bytes>,
     poisoned: bool,
 }
 
@@ -95,7 +95,7 @@ impl RequestParser {
         }))
     }
 
-    fn parse_cstr(&mut self) -> Result<Option<Vec<u8>>, ParseError> {
+    fn parse_cstr(&mut self) -> Result<Option<Bytes>, ParseError> {
         if self.g_idx >= self.q_buff.len() {
             return Ok(None);
         }
@@ -131,7 +131,7 @@ impl RequestParser {
         Ok(Some(cstr))
     }
 
-    fn take_request(&mut self) -> Vec<Vec<u8>> {
+    fn take_request(&mut self) -> Vec<Bytes> {
         self.q_buff.drain(..self.g_idx);
         self.g_idx = 0;
         self.arr_len = None;
@@ -199,14 +199,14 @@ impl Request {
         buf
     }
 
-    pub fn into_args(self) -> Vec<Vec<u8>> {
+    pub fn into_args(self) -> Vec<Bytes> {
         self.cstrs
     }
 }
 
 #[cfg(test)]
 impl Request {
-    pub fn from_args(cstrs: Vec<Vec<u8>>) -> Request {
+    pub fn from_args(cstrs: Vec<Bytes>) -> Request {
         Request { cstrs }
     }
 }
@@ -215,17 +215,14 @@ impl Request {
 mod tests {
     use super::*;
 
-    fn push_parse(
-        parser: &mut RequestParser,
-        bytes: &[u8],
-    ) -> Result<Option<Request>, ParseError> {
+    fn push_parse(parser: &mut RequestParser, bytes: &[u8]) -> Result<Option<Request>, ParseError> {
         parser.push_bytes(bytes);
         parser.parse_next()
     }
 
     /// Assert that parsing `input` yields a complete request whose bulk strings
     /// match `expected`.
-    fn assert_parses(input: &[u8], expected: Vec<Vec<u8>>) {
+    fn assert_parses(input: &[u8], expected: Vec<Bytes>) {
         let mut parser = RequestParser::default();
         let request = push_parse(&mut parser, input)
             .expect("parse should succeed")
@@ -361,17 +358,15 @@ mod tests {
     fn completes_request_fed_in_chunks() {
         let mut parser = RequestParser::default();
 
-        assert!(push_parse(&mut parser, b"*2\r\n").expect("no error").is_none());
-        assert!(
-            push_parse(&mut parser, b"$3\r\nGET")
-                .expect("no error")
-                .is_none()
-        );
-        assert!(
-            push_parse(&mut parser, b"\r\n$5\r\nMYKE")
-                .expect("no error")
-                .is_none()
-        );
+        assert!(push_parse(&mut parser, b"*2\r\n")
+            .expect("no error")
+            .is_none());
+        assert!(push_parse(&mut parser, b"$3\r\nGET")
+            .expect("no error")
+            .is_none());
+        assert!(push_parse(&mut parser, b"\r\n$5\r\nMYKE")
+            .expect("no error")
+            .is_none());
 
         let request = push_parse(&mut parser, b"Y\r\n")
             .expect("no error")
@@ -495,9 +490,7 @@ mod tests {
     #[test]
     fn parse_next_yields_second_request_without_more_bytes() {
         let mut parser = RequestParser::default();
-        parser.push_bytes(
-            b"*2\r\n$3\r\nGET\r\n$1\r\na\r\n*2\r\n$3\r\nGET\r\n$1\r\nb\r\n",
-        );
+        parser.push_bytes(b"*2\r\n$3\r\nGET\r\n$1\r\na\r\n*2\r\n$3\r\nGET\r\n$1\r\nb\r\n");
 
         let first = parser
             .parse_next()
