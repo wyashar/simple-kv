@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Write, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 
@@ -8,9 +8,9 @@ use crate::command::Command;
 use crate::config::Config;
 use crate::key_store::KeyStore;
 use crate::request::RequestParser;
+use crate::request::{Request, RequestParseError};
 use crate::response::Response;
 use crate::util::Bytes;
-use crate::request::{RequestParseError, Request};
 
 const DEFAULT_AOF_PATH: &str = "simple-kv.aof";
 
@@ -48,10 +48,6 @@ pub fn serve(listener: TcpListener, config: Config) {
             }
         }
     }
-}
-
-fn deserialize_request() {
-    
 }
 
 fn handle_connection(

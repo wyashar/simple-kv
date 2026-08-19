@@ -1,11 +1,12 @@
 use std::fmt;
 
 use log::debug;
+use std::io::BufRead;
 use thiserror::Error;
 
 use crate::request::RequestParseError::{
     ArrayTooLong, CStringTooLong, ExpectedArray, ExpectedCString, MissingCrlf, MissingFirstByte,
-    Poisoned,
+    Poisoned, UnexpectedEof,
 };
 use crate::util::{parse_line, Bytes, Parsed, CRLF, CSTRING_BYTE, MAX_COMPLEX_STRING_LENGTH};
 
@@ -38,6 +39,8 @@ pub enum RequestParseError {
     InvalidUtf8(#[from] std::str::Utf8Error),
     #[error("invalid integer in payload")]
     InvalidInt(#[from] std::num::ParseIntError),
+    #[error("failed to read request: {0}")]
+    Io(#[from] std::io::Error),
     #[error("array length {0} exceeds maximum {MAX_ARRAY_LENGTH}")]
     ArrayTooLong(usize),
     #[error("expected complex string ($), got {ch:?}", ch = *.0 as char)]
@@ -46,6 +49,8 @@ pub enum RequestParseError {
     CStringTooLong(usize),
     #[error("parser was reused after a previous error")]
     Poisoned,
+    #[error("unexpected EOF during request parsing")]
+    UnexpectedEof,
 }
 
 impl RequestParser {
@@ -53,19 +58,55 @@ impl RequestParser {
         self.q_buff.extend_from_slice(bytes);
     }
 
+    pub fn finish(&self) -> Result<(), RequestParseError> {
+        if self.poisoned {
+            return Err(Poisoned);
+        }
+
+        if !self.q_buff.is_empty() {
+            return Err(UnexpectedEof);
+        }
+
+        Ok(())
+    }
+
+    pub fn deserialize_request<T: BufRead>(
+        &mut self,
+        reader: &mut T,
+    ) -> Result<Option<Request>, RequestParseError> {
+        loop {
+            if let Some(request) = self.parse_next()? {
+                return Ok(Some(request));
+            }
+
+            let num_bytes_read = {
+                let bytes = reader.fill_buf()?;
+                if bytes.is_empty() {
+                    self.finish()?;
+                    return Ok(None);
+                }
+
+                self.q_buff.extend_from_slice(bytes);
+                bytes.len()
+            };
+
+            reader.consume(num_bytes_read);
+        }
+    }
+
     pub fn parse_next(&mut self) -> Result<Option<Request>, RequestParseError> {
         if self.poisoned {
             return Err(Poisoned);
         }
 
-        let result = self.parse_next_internal();
+        let result = self.parse_buffered();
         if result.is_err() {
             self.poisoned = true;
         }
         result
     }
 
-    fn parse_next_internal(&mut self) -> Result<Option<Request>, RequestParseError> {
+    fn parse_buffered(&mut self) -> Result<Option<Request>, RequestParseError> {
         if self.arr_len.is_none() {
             let Some(arr_header) = Self::parse_header(
                 &self.q_buff,
@@ -215,7 +256,10 @@ impl Request {
 mod tests {
     use super::*;
 
-    fn push_parse(parser: &mut RequestParser, bytes: &[u8]) -> Result<Option<Request>, RequestParseError> {
+    fn push_parse(
+        parser: &mut RequestParser,
+        bytes: &[u8],
+    ) -> Result<Option<Request>, RequestParseError> {
         parser.push_bytes(bytes);
         parser.parse_next()
     }
@@ -426,6 +470,44 @@ mod tests {
             .parse_next()
             .expect_err("poisoned parser should reject further input");
         assert!(matches!(err, RequestParseError::Poisoned));
+    }
+
+    #[test]
+    fn finish_succeeds_when_parser_is_empty() {
+        let parser = RequestParser::default();
+
+        assert!(parser.finish().is_ok());
+    }
+
+    #[test]
+    fn finish_succeeds_after_complete_request_is_consumed() {
+        let mut parser = RequestParser::default();
+        push_parse(&mut parser, b"*1\r\n$4\r\nPING\r\n")
+            .expect("parse should succeed")
+            .expect("request should be complete");
+
+        assert!(parser.finish().is_ok());
+    }
+
+    #[test]
+    fn finish_errors_when_request_is_incomplete() {
+        let mut parser = RequestParser::default();
+        assert!(push_parse(&mut parser, b"*2\r\n$3\r\nGET\r\n")
+            .expect("parse should not error")
+            .is_none());
+
+        assert!(matches!(
+            parser.finish(),
+            Err(RequestParseError::UnexpectedEof)
+        ));
+    }
+
+    #[test]
+    fn finish_reports_poisoned_before_buffered_data() {
+        let mut parser = RequestParser::default();
+        let _ = push_parse(&mut parser, b"&1\r\n").expect_err("parse should fail");
+
+        assert!(matches!(parser.finish(), Err(RequestParseError::Poisoned)));
     }
 
     #[test]
