@@ -242,10 +242,10 @@ mod tests {
     }
 
     fn assert_round_trips(command: Command) {
-        let mut parser = crate::request::RequestParser::default();
-        parser.push_bytes(&command.to_bytes());
-        let request = parser
-            .parse_next()
+        let mut requests =
+            crate::request::RequestReader::new(std::io::Cursor::new(command.to_bytes()));
+        let request = requests
+            .read_next()
             .expect("serialized command should be valid RESP")
             .expect("serialized command should be a complete request");
 

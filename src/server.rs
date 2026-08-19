@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 
@@ -7,8 +7,7 @@ use log::{info, warn};
 use crate::command::Command;
 use crate::config::Config;
 use crate::key_store::KeyStore;
-use crate::request::RequestParser;
-use crate::request::{Request, RequestParseError};
+use crate::request::RequestReader;
 use crate::response::Response;
 use crate::util::Bytes;
 
@@ -32,14 +31,13 @@ pub fn serve(listener: TcpListener, config: Config) {
         aof_path.display()
     );
     let mut key_store: KeyStore<Bytes, Bytes> = KeyStore::default();
-    let mut rqst_parser = RequestParser::default();
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => match stream.peer_addr() {
                 Ok(peer) => {
                     info!("accepted connection from {peer}");
-                    handle_connection(stream, peer, &mut rqst_parser, &mut key_store);
+                    handle_connection(stream, peer, &mut key_store);
                 }
                 Err(_) => info!("accepted connection from unknown peer"),
             },
@@ -50,49 +48,31 @@ pub fn serve(listener: TcpListener, config: Config) {
     }
 }
 
-fn handle_connection(
-    stream: TcpStream,
-    peer: SocketAddr,
-    rqst_parser: &mut RequestParser,
-    key_store: &mut KeyStore<Bytes, Bytes>,
-) {
-    let mut reader = BufReader::new(stream);
+fn handle_connection(stream: TcpStream, peer: SocketAddr, key_store: &mut KeyStore<Bytes, Bytes>) {
+    let mut requests = RequestReader::new(BufReader::new(stream));
 
     loop {
-        let n = match reader.fill_buf() {
-            Ok([]) => {
+        let request = match requests.read_next() {
+            Ok(Some(request)) => request,
+            Ok(None) => {
                 info!("{peer} disconnected");
                 return;
             }
-            Ok(buf) => {
-                rqst_parser.push_bytes(buf);
-                buf.len()
-            }
             Err(e) => {
-                warn!("failed to read from {peer}: {e}");
+                warn!("failed to read request from {peer}: {e}");
+                send_response(requests.get_mut().get_mut(), Response::Error(e.to_string()));
                 return;
             }
         };
-        reader.consume(n);
 
-        loop {
-            match rqst_parser.parse_next() {
-                Ok(Some(request)) => match Command::try_from(request) {
-                    Ok(command) => {
-                        info!("received command from {peer}: {command}");
-                        send_response(reader.get_mut(), command.apply(key_store));
-                    }
-                    Err(e) => {
-                        warn!("invalid command from {peer}: {e}");
-                        send_response(reader.get_mut(), Response::Error(e.to_string()));
-                    }
-                },
-                Ok(None) => break,
-                Err(e) => {
-                    warn!("failed to parse request from {peer}: {e}");
-                    send_response(reader.get_mut(), Response::Error(e.to_string()));
-                    return;
-                }
+        match Command::try_from(request) {
+            Ok(command) => {
+                info!("received command from {peer}: {command}");
+                send_response(requests.get_mut().get_mut(), command.apply(key_store));
+            }
+            Err(e) => {
+                warn!("invalid command from {peer}: {e}");
+                send_response(requests.get_mut().get_mut(), Response::Error(e.to_string()));
             }
         }
     }
