@@ -4,9 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use log::info;
-use tempfile::TempDir;
 
-use simple_kv::append_only_file::AppendOnlyFile;
 use simple_kv::command::Command;
 use simple_kv::response::{Response, ResponseParser};
 use simple_kv::server;
@@ -20,17 +18,14 @@ fn init_logging() {
         .try_init();
 }
 
-fn spawn_server() -> (SocketAddr, TempDir) {
+fn spawn_server() -> SocketAddr {
     init_logging();
 
     let listener = TcpListener::bind(TEST_SERVER_ADDR).expect("failed to bind test server");
     let addr = listener.local_addr().expect("failed to read bound address");
-    let aof_dir = TempDir::new().expect("temp dir creation should work");
-    let aof = AppendOnlyFile::open(aof_dir.path().join("appendonly.aof"))
-        .expect("open should create the AOF");
-    thread::spawn(move || server::serve(listener, aof));
+    thread::spawn(move || server::serve(listener));
     info!("test server running on {addr}");
-    (addr, aof_dir)
+    addr
 }
 
 fn connect(addr: SocketAddr) -> TcpStream {
@@ -81,7 +76,7 @@ fn deserialize_response(stream: &mut TcpStream) -> Response {
 
 #[test]
 fn get_returns_cstr() {
-    let (addr, _aof_dir) = spawn_server();
+    let addr = spawn_server();
     let key = b"mykey".to_vec();
     let value = b"myval".to_vec();
 
@@ -97,7 +92,7 @@ fn get_returns_cstr() {
 
 #[test]
 fn set_returns_ok() {
-    let (addr, _aof_dir) = spawn_server();
+    let addr = spawn_server();
     assert_eq!(
         send_request(addr, &Command::Set(b"mykey".to_vec(), b"myval".to_vec())),
         Response::Ok
@@ -106,7 +101,7 @@ fn set_returns_ok() {
 
 #[test]
 fn del_returns_integer() {
-    let (addr, _aof_dir) = spawn_server();
+    let addr = spawn_server();
     assert_eq!(
         send_request(addr, &Command::Set(b"k1".to_vec(), b"v1".to_vec())),
         Response::Ok
@@ -123,7 +118,7 @@ fn del_returns_integer() {
 
 #[test]
 fn unrecognized_command_returns_error() {
-    let (addr, _aof_dir) = spawn_server();
+    let addr = spawn_server();
     let Response::Error(msg) = send_raw(addr, b"*2\r\n$3\r\nFOO\r\n$5\r\nmykey\r\n") else {
         panic!("expected an error response");
     };
@@ -135,7 +130,7 @@ fn unrecognized_command_returns_error() {
 
 #[test]
 fn malformed_request_returns_error() {
-    let (addr, _aof_dir) = spawn_server();
+    let addr = spawn_server();
     let Response::Error(msg) = send_raw(addr, b"&2\r\n$3\r\nGET\r\n$5\r\nmykey\r\n") else {
         panic!("expected an error response");
     };

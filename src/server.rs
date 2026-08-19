@@ -3,7 +3,6 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 
 use log::{info, warn};
 
-use crate::append_only_file::AppendOnlyFile;
 use crate::command::Command;
 use crate::key_store::KeyStore;
 use crate::request::RequestParser;
@@ -12,12 +11,12 @@ use crate::util::Bytes;
 
 const READ_BUF_SIZE: usize = 8 * 1024;
 
-pub fn run(addr: &str, aof: AppendOnlyFile) {
+pub fn run(addr: &str) {
     let listener = TcpListener::bind(addr).expect("failed to bind to address");
-    serve(listener, aof);
+    serve(listener);
 }
 
-pub fn serve(listener: TcpListener, mut aof: AppendOnlyFile) {
+pub fn serve(listener: TcpListener) {
     let addr = listener.local_addr().expect("failed to read bound address");
     info!("listening on {addr}");
     let mut key_store = KeyStore::default();
@@ -27,7 +26,7 @@ pub fn serve(listener: TcpListener, mut aof: AppendOnlyFile) {
             Ok(stream) => match stream.peer_addr() {
                 Ok(peer) => {
                     info!("accepted connection from {peer}");
-                    handle_connection(stream, peer, &mut key_store, &mut aof);
+                    handle_connection(stream, peer, &mut key_store);
                 }
                 Err(_) => info!("accepted connection from unknown peer"),
             },
@@ -42,7 +41,6 @@ fn handle_connection(
     mut stream: TcpStream,
     peer: SocketAddr,
     key_store: &mut KeyStore<Bytes, Bytes>,
-    aof: &mut AppendOnlyFile,
 ) {
     let mut parser = RequestParser::default();
     let mut buf = [0u8; READ_BUF_SIZE];
@@ -66,7 +64,7 @@ fn handle_connection(
                 Ok(Some(request)) => match Command::try_from(request) {
                     Ok(command) => {
                         info!("received command from {peer}: {command}");
-                        send_response(&mut stream, apply_command(command, key_store, aof));
+                        send_response(&mut stream, apply_command(command, key_store));
                     }
                     Err(e) => {
                         warn!("invalid command from {peer}: {e}");
@@ -87,15 +85,7 @@ fn handle_connection(
 fn apply_command<'store>(
     command: Command,
     key_store: &'store mut KeyStore<Bytes, Bytes>,
-    aof: &mut AppendOnlyFile,
 ) -> Response<&'store [u8]> {
-    if command.is_write() {
-        if let Err(e) = aof.append(&command.to_bytes()) {
-            warn!("failed to append command to AOF: {e}");
-            return Response::Error(e.to_string());
-        }
-    }
-
     match command {
         Command::Get(key) => key_store
             .get(&key)
