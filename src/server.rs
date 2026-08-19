@@ -26,10 +26,11 @@ pub fn serve(listener: TcpListener, config: Config) {
         .as_deref()
         .unwrap_or_else(|| Path::new(DEFAULT_AOF_PATH));
     info!(
-        "listening on {addr} with {:?} fsync policy and AOF at {}",
+        "Server started on {addr}. FSYNC Policy is {:?}. AOF is at {}",
         config.fsync_policy,
         aof_path.display()
     );
+
     let mut key_store: KeyStore<Bytes, Bytes> = KeyStore::default();
 
     for stream in listener.incoming() {
