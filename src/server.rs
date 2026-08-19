@@ -31,7 +31,7 @@ pub fn serve(listener: TcpListener, config: Config) {
         config.fsync_policy,
         aof_path.display()
     );
-    let mut key_store = KeyStore::default();
+    let mut key_store: KeyStore<Bytes, Bytes> = KeyStore::default();
     let mut rqst_parser = RequestParser::default();
 
     for stream in listener.incoming() {
@@ -104,7 +104,7 @@ fn apply_command<'store>(
             .get(&key)
             .map_or_else(|| Response::Null, |value| Response::Cstr(value.as_slice())),
         Command::Set(key, value) => {
-            key_store.insert(key, value);
+            let _ = key_store.insert(key, value);
             Response::Ok
         }
         Command::Del(keys) => {

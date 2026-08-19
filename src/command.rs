@@ -4,7 +4,9 @@ use thiserror::Error;
 
 use crate::command::CommandError::{TooFewArguments, TooManyArguments, UnrecognizedCommand};
 use crate::request::Request;
+use crate::response::Response;
 use crate::util::Bytes;
+use crate::key_store::KeyStore;
 
 const GET_STR: &'static str = "GET";
 const SET_STR: &'static str = "SET";
@@ -45,6 +47,26 @@ impl Command {
 
     pub fn is_write(&self) -> bool {
         self.name() == SET_STR || self.name() == DEL_STR
+    }
+
+    pub fn apply(self, key_store: &mut KeyStore<Bytes, Bytes>) -> Response<&[u8]> {
+        match self {
+            Self::Get(key) => key_store
+                .get(&key)
+                .map(|value| Response::Cstr(value.as_slice()))
+                .unwrap_or(Response::Null),
+            Self::Del(keys) => {
+                let count = keys
+                    .iter()
+                    .filter_map(|k| key_store.del(k))
+                    .count();
+                Response::Integer(count as i64)
+            },
+            Self::Set(key, value) => {
+                let _ = key_store.insert(key, value);
+                Response::Ok
+            },
+        }
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {

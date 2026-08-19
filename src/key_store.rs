@@ -93,7 +93,7 @@ impl<K, V, S> KeyStore<K, V, S> {
                     return None;
                 }
                 Some(e) => {
-                    if e.psl < psl {
+                    if e.psl < psl { // this invariant is maintained by insertion is robin hood swap
                         return None;
                     }
 
@@ -150,7 +150,7 @@ impl<K, V, S> KeyStore<K, V, S> {
         }
     }
 
-    pub fn insert(&mut self, key: K, value: V)
+    pub fn insert(&mut self, key: K, value: V) -> Option<V>
     where
         K: Eq + Hash,
         S: BuildHasher,
@@ -167,14 +167,13 @@ impl<K, V, S> KeyStore<K, V, S> {
                     if self.should_resize() {
                         self.resize();
                     }
-                    return;
+                    return None;
                 }
                 Some(e) => {
                     if e.hash == entry.hash && e.key == entry.key {
-                        e.value = entry.value;
-                        return;
+                        return Some(std::mem::replace(&mut e.value, entry.value));
                     }
-                    if e.psl < entry.psl {
+                    if e.psl < entry.psl { // robin hood swapping, richer entries reinserted
                         std::mem::swap(e, &mut entry);
                     }
                 }
@@ -238,7 +237,7 @@ mod tests {
     fn insert_makes_value_retrievable() {
         let mut store = KeyStore::default();
 
-        store.insert("key", "value");
+        assert_eq!(store.insert("key", "value"), None);
 
         assert_eq!(store.get(&"key"), Some(&"value"));
         assert_eq!(store.len, 1);
@@ -247,9 +246,9 @@ mod tests {
     #[test]
     fn insert_replaces_existing_value() {
         let mut store = KeyStore::default();
-        store.insert("key", "old");
+        assert_eq!(store.insert("key", "old"), None);
 
-        store.insert("key", "new");
+        assert_eq!(store.insert("key", "new"), Some("old"));
 
         assert_eq!(store.get(&"key"), Some(&"new"));
         assert_eq!(store.len, 1);
