@@ -1,31 +1,36 @@
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 
 pub struct AppendOnlyFile {
-    buf_writer: BufWriter<File>,
+    file: File,
 }
 
 impl AppendOnlyFile {
     pub fn open<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
         let file = OpenOptions::new()
+            .read(true)
             .append(true)
             .create(true)
             .open(path)?;
 
-        Ok(Self {
-            buf_writer: BufWriter::new(file),
-        })
+        Ok(Self { file })
     }
 
     pub fn append(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        self.buf_writer.write_all(bytes)
+        self.file.write_all(bytes)
+    }
+
+    pub fn reader(&mut self) -> std::io::Result<BufReader<&File>> {
+        self.file.seek(SeekFrom::Start(0))?;
+        Ok(BufReader::new(&self.file))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -64,8 +69,7 @@ mod tests {
         let path = file_path(&dir, "tmp.log");
 
         {
-            let mut aof =
-                AppendOnlyFile::open(&path).expect("open should create the file");
+            let mut aof = AppendOnlyFile::open(&path).expect("open should create the file");
             aof.append(b"some data").expect("append should work");
         }
 
@@ -80,12 +84,28 @@ mod tests {
         std::fs::write(&path, b"existing ").expect("seeding the file should work");
 
         {
-            let mut aof = AppendOnlyFile::open(&path)
-                .expect("open should succeed for an existing file");
+            let mut aof =
+                AppendOnlyFile::open(&path).expect("open should succeed for an existing file");
             aof.append(b"data").expect("append should work");
         }
 
         let contents = std::fs::read(&path).expect("read should work");
         assert_eq!(contents, b"existing data");
+    }
+
+    #[test]
+    fn reader_reads_appended_data_from_start() {
+        let dir = TempDir::new().expect("temp dir creation should work");
+        let path = file_path(&dir, "tmp.log");
+        let mut aof = AppendOnlyFile::open(path).expect("open should work");
+        aof.append(b"pending data").expect("append should work");
+
+        let mut contents = Vec::new();
+        aof.reader()
+            .expect("reader creation should work")
+            .read_to_end(&mut contents)
+            .expect("read should work");
+
+        assert_eq!(contents, b"pending data");
     }
 }

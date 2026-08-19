@@ -8,7 +8,7 @@ use crate::request::RequestParseError::{
     ArrayTooLong, CStringTooLong, ExpectedArray, ExpectedCString, MissingCrlf, MissingFirstByte,
     Poisoned, UnexpectedEof,
 };
-use crate::util::{parse_line, Bytes, Parsed, CRLF, CSTRING_BYTE, MAX_COMPLEX_STRING_LENGTH};
+use crate::util::{Bytes, CRLF, CSTRING_BYTE, MAX_COMPLEX_STRING_LENGTH, Parsed, parse_line};
 
 const MAX_ARRAY_LENGTH: usize = 1024 * 1024;
 const ARRAY_BYTE: u8 = b'*';
@@ -66,7 +66,7 @@ impl<R> RequestReader<R> {
         }
     }
 
-    pub fn get_mut(&mut self) -> &mut R {
+    pub fn get_reader_mut(&mut self) -> &mut R {
         &mut self.reader
     }
 

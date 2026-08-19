@@ -1,9 +1,12 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::Path;
+use std::process::{Child, Command as ProcessCommand, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::info;
+use tempfile::TempDir;
 
 use simple_kv::command::Command;
 use simple_kv::config::{Config, FsyncPolicy};
@@ -12,6 +15,64 @@ use simple_kv::server;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 const TEST_SERVER_ADDR: &str = "127.0.0.1:0";
+
+struct ServerProcess {
+    child: Option<Child>,
+    addr: SocketAddr,
+}
+
+impl ServerProcess {
+    fn spawn(aof_path: &Path) -> Self {
+        let listener = TcpListener::bind(TEST_SERVER_ADDR).expect("failed to reserve test address");
+        let addr = listener.local_addr().expect("failed to read test address");
+        drop(listener);
+
+        let child = ProcessCommand::new(env!("CARGO_BIN_EXE_simple-kv"))
+            .env("SERVER_ADDRESS", addr.ip().to_string())
+            .env("SERVER_PORT", addr.port().to_string())
+            .env("FSYNC_POLICY", "ONE_MIN")
+            .env("AOF_PATH", aof_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to start test server process");
+
+        let server = Self {
+            child: Some(child),
+            addr,
+        };
+        server.wait_until_ready();
+        server
+    }
+
+    fn wait_until_ready(&self) {
+        let deadline = Instant::now() + IO_TIMEOUT;
+        loop {
+            if TcpStream::connect_timeout(&self.addr, Duration::from_millis(50)).is_ok() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "server did not start at {}",
+                self.addr
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn stop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            child.wait().expect("failed to wait for test server");
+        }
+    }
+}
+
+impl Drop for ServerProcess {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
 
 fn init_logging() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -24,13 +85,17 @@ fn spawn_server() -> SocketAddr {
 
     let listener = TcpListener::bind(TEST_SERVER_ADDR).expect("failed to bind test server");
     let addr = listener.local_addr().expect("failed to read bound address");
+    let aof_dir = TempDir::new().expect("failed to create temporary AOF directory");
     let config = Config {
         server_address: addr.ip().to_string(),
         server_port: addr.port(),
         fsync_policy: FsyncPolicy::OneMin,
-        aof_path: None,
+        aof_path: Some(aof_dir.path().join("test.aof")),
     };
-    thread::spawn(move || server::serve(listener, config));
+    thread::spawn(move || {
+        let _aof_dir = aof_dir;
+        server::serve(listener, config);
+    });
     info!("test server running on {addr}");
     addr
 }
@@ -144,5 +209,60 @@ fn malformed_request_returns_error() {
     assert!(
         msg.contains("expected top-level array"),
         "unexpected error: {msg}"
+    );
+}
+
+#[test]
+fn empty_aof_starts_with_empty_key_store() {
+    let dir = TempDir::new().expect("failed to create temporary AOF directory");
+    let aof_path = dir.path().join("empty.aof");
+    std::fs::write(&aof_path, []).expect("failed to create empty AOF");
+    let server = ServerProcess::spawn(&aof_path);
+
+    assert_eq!(
+        send_request(server.addr, &Command::Get(b"missing".to_vec())),
+        Response::Null
+    );
+}
+
+#[test]
+fn key_store_state_survives_server_restart() {
+    let dir = TempDir::new().expect("failed to create temporary AOF directory");
+    let aof_path = dir.path().join("restart.aof");
+    let key = b"persistent-key".to_vec();
+    let value = b"persistent-value".to_vec();
+
+    let mut first_server = ServerProcess::spawn(&aof_path);
+    assert_eq!(
+        send_request(first_server.addr, &Command::Set(key.clone(), value.clone())),
+        Response::Ok
+    );
+    first_server.stop();
+
+    let restarted_server = ServerProcess::spawn(&aof_path);
+    assert_eq!(
+        send_request(restarted_server.addr, &Command::Get(key)),
+        Response::Cstr(value)
+    );
+}
+
+#[test]
+fn server_restores_state_from_prepopulated_aof() {
+    let dir = TempDir::new().expect("failed to create temporary AOF directory");
+    let aof_path = dir.path().join("prepopulated.aof");
+    let mut contents = Command::Set(b"kept".to_vec(), b"value".to_vec()).to_bytes();
+    contents.extend(Command::Set(b"deleted".to_vec(), b"value".to_vec()).to_bytes());
+    contents.extend(Command::Del(vec![b"deleted".to_vec()]).to_bytes());
+    std::fs::write(&aof_path, contents).expect("failed to write AOF commands");
+
+    let server = ServerProcess::spawn(&aof_path);
+
+    assert_eq!(
+        send_request(server.addr, &Command::Get(b"kept".to_vec())),
+        Response::Cstr(b"value".to_vec())
+    );
+    assert_eq!(
+        send_request(server.addr, &Command::Get(b"deleted".to_vec())),
+        Response::Null
     );
 }
