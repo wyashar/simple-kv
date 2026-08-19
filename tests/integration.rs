@@ -6,6 +6,7 @@ use std::time::Duration;
 use log::info;
 
 use simple_kv::command::Command;
+use simple_kv::config::{Config, FsyncPolicy};
 use simple_kv::response::{Response, ResponseParser};
 use simple_kv::server;
 
@@ -23,7 +24,13 @@ fn spawn_server() -> SocketAddr {
 
     let listener = TcpListener::bind(TEST_SERVER_ADDR).expect("failed to bind test server");
     let addr = listener.local_addr().expect("failed to read bound address");
-    thread::spawn(move || server::serve(listener));
+    let config = Config {
+        server_address: addr.ip().to_string(),
+        server_port: addr.port(),
+        fsync_policy: FsyncPolicy::OneMin,
+        aof_path: None,
+    };
+    thread::spawn(move || server::serve(listener, config));
     info!("test server running on {addr}");
     addr
 }

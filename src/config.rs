@@ -1,4 +1,5 @@
 use std::env;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -7,12 +8,14 @@ use thiserror::Error;
 const SERVER_ADDRESS: &str = "SERVER_ADDRESS";
 const SERVER_PORT: &str = "SERVER_PORT";
 const FSYNC_POLICY: &str = "FSYNC_POLICY";
+const AOF_PATH: &str = "AOF_PATH";
 const FSYNC_POLICY_NAMES: [&str; 4] = ["ONE_MIN", "TWO_MIN", "THREE_MIN", "FIVE_MIN"];
 
 pub struct Config {
     pub server_address: String,
     pub server_port: u16,
     pub fsync_policy: FsyncPolicy,
+    pub aof_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,14 +71,14 @@ impl Config {
         let fsync_policy = env::var(FSYNC_POLICY)
             .unwrap_or_else(|_| panic!("{FSYNC_POLICY} must be set"))
             .parse()
-            .unwrap_or_else(|_| {
-                panic!("{FSYNC_POLICY} must be one of {FSYNC_POLICY_NAMES:?}")
-            });
+            .unwrap_or_else(|_| panic!("{FSYNC_POLICY} must be one of {FSYNC_POLICY_NAMES:?}"));
+        let aof_path = env::var(AOF_PATH).ok().map(PathBuf::from);
 
         Config {
             server_address,
             server_port,
             fsync_policy,
+            aof_path,
         }
     }
 }
