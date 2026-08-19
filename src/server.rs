@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Write, Read};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 
@@ -10,8 +10,8 @@ use crate::key_store::KeyStore;
 use crate::request::RequestParser;
 use crate::response::Response;
 use crate::util::Bytes;
+use crate::request::{RequestParseError, Request};
 
-const READ_BUF_SIZE: usize = 8 * 1024;
 const DEFAULT_AOF_PATH: &str = "simple-kv.aof";
 
 pub fn run(config: Config) {
@@ -50,66 +50,54 @@ pub fn serve(listener: TcpListener, config: Config) {
     }
 }
 
+fn deserialize_request() {
+    
+}
+
 fn handle_connection(
-    mut stream: TcpStream,
+    stream: TcpStream,
     peer: SocketAddr,
     rqst_parser: &mut RequestParser,
     key_store: &mut KeyStore<Bytes, Bytes>,
 ) {
-    let mut buf = [0u8; READ_BUF_SIZE];
+    let mut reader = BufReader::new(stream);
 
     loop {
-        let n = match stream.read(&mut buf) {
-            Ok(0) => {
+        let n = match reader.fill_buf() {
+            Ok([]) => {
                 info!("{peer} disconnected");
                 return;
             }
-            Ok(n) => n,
+            Ok(buf) => {
+                rqst_parser.push_bytes(buf);
+                buf.len()
+            }
             Err(e) => {
                 warn!("failed to read from {peer}: {e}");
                 return;
             }
         };
+        reader.consume(n);
 
-        rqst_parser.push_bytes(&buf[..n]);
         loop {
             match rqst_parser.parse_next() {
                 Ok(Some(request)) => match Command::try_from(request) {
                     Ok(command) => {
                         info!("received command from {peer}: {command}");
-                        send_response(&mut stream, apply_command(command, key_store));
+                        send_response(reader.get_mut(), command.apply(key_store));
                     }
                     Err(e) => {
                         warn!("invalid command from {peer}: {e}");
-                        send_response(&mut stream, Response::Error(e.to_string()));
+                        send_response(reader.get_mut(), Response::Error(e.to_string()));
                     }
                 },
                 Ok(None) => break,
                 Err(e) => {
                     warn!("failed to parse request from {peer}: {e}");
-                    send_response(&mut stream, Response::Error(e.to_string()));
+                    send_response(reader.get_mut(), Response::Error(e.to_string()));
                     return;
                 }
             }
-        }
-    }
-}
-
-fn apply_command<'store>(
-    command: Command,
-    key_store: &'store mut KeyStore<Bytes, Bytes>,
-) -> Response<&'store [u8]> {
-    match command {
-        Command::Get(key) => key_store
-            .get(&key)
-            .map_or_else(|| Response::Null, |value| Response::Cstr(value.as_slice())),
-        Command::Set(key, value) => {
-            let _ = key_store.insert(key, value);
-            Response::Ok
-        }
-        Command::Del(keys) => {
-            let deleted_count = keys.iter().filter_map(|key| key_store.del(key)).count();
-            Response::Integer(deleted_count as i64)
         }
     }
 }

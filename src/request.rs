@@ -3,7 +3,7 @@ use std::fmt;
 use log::debug;
 use thiserror::Error;
 
-use crate::request::ParseError::{
+use crate::request::RequestParseError::{
     ArrayTooLong, CStringTooLong, ExpectedArray, ExpectedCString, MissingCrlf, MissingFirstByte,
     Poisoned,
 };
@@ -27,7 +27,7 @@ pub struct RequestParser {
 }
 
 #[derive(Error, Debug)]
-pub enum ParseError {
+pub enum RequestParseError {
     #[error("request was empty; no first byte present")]
     MissingFirstByte,
     #[error("expected top-level array (*), got {ch:?}", ch = *.0 as char)]
@@ -53,7 +53,7 @@ impl RequestParser {
         self.q_buff.extend_from_slice(bytes);
     }
 
-    pub fn parse_next(&mut self) -> Result<Option<Request>, ParseError> {
+    pub fn parse_next(&mut self) -> Result<Option<Request>, RequestParseError> {
         if self.poisoned {
             return Err(Poisoned);
         }
@@ -65,7 +65,7 @@ impl RequestParser {
         result
     }
 
-    fn parse_next_internal(&mut self) -> Result<Option<Request>, ParseError> {
+    fn parse_next_internal(&mut self) -> Result<Option<Request>, RequestParseError> {
         if self.arr_len.is_none() {
             let Some(arr_header) = Self::parse_header(
                 &self.q_buff,
@@ -95,7 +95,7 @@ impl RequestParser {
         }))
     }
 
-    fn parse_cstr(&mut self) -> Result<Option<Bytes>, ParseError> {
+    fn parse_cstr(&mut self) -> Result<Option<Bytes>, RequestParseError> {
         if self.g_idx >= self.q_buff.len() {
             return Ok(None);
         }
@@ -143,9 +143,9 @@ impl RequestParser {
         bytes: &[u8],
         header_byte: u8,
         max_header_len: usize,
-        expected_error: fn(u8) -> ParseError,
-        too_long_error: fn(usize) -> ParseError,
-    ) -> Result<Option<Parsed<usize>>, ParseError> {
+        expected_error: fn(u8) -> RequestParseError,
+        too_long_error: fn(usize) -> RequestParseError,
+    ) -> Result<Option<Parsed<usize>>, RequestParseError> {
         let Some(header) = parse_line(bytes) else {
             debug!("missing CRLF in header payload");
             return Ok(None);
@@ -215,7 +215,7 @@ impl Request {
 mod tests {
     use super::*;
 
-    fn push_parse(parser: &mut RequestParser, bytes: &[u8]) -> Result<Option<Request>, ParseError> {
+    fn push_parse(parser: &mut RequestParser, bytes: &[u8]) -> Result<Option<Request>, RequestParseError> {
         parser.push_bytes(bytes);
         parser.parse_next()
     }
@@ -282,7 +282,7 @@ mod tests {
     }
 
     /// Parse `input` and return the parse error it produces.
-    fn parse_error(input: &[u8]) -> ParseError {
+    fn parse_error(input: &[u8]) -> RequestParseError {
         let mut parser = RequestParser::default();
         push_parse(&mut parser, input).expect_err("parse should fail")
     }
@@ -290,25 +290,25 @@ mod tests {
     #[test]
     fn errors_when_array_byte_is_wrong() {
         let err = parse_error(b"&2\r\n$3\r\nGET\r\n$5\r\nMYKEY\r\n");
-        assert!(matches!(err, ParseError::ExpectedArray(b'&')));
+        assert!(matches!(err, RequestParseError::ExpectedArray(b'&')));
     }
 
     #[test]
     fn errors_when_array_byte_is_missing() {
         let err = parse_error(b"\r\n$3\r\nGET\r\n$5\r\nMYKEY\r\n");
-        assert!(matches!(err, ParseError::MissingFirstByte));
+        assert!(matches!(err, RequestParseError::MissingFirstByte));
     }
 
     #[test]
     fn errors_when_cstr_byte_is_wrong() {
         let err = parse_error(b"*2\r\n&3\r\nGET\r\n$5\r\nMYKEY\r\n");
-        assert!(matches!(err, ParseError::ExpectedCString(b'&')));
+        assert!(matches!(err, RequestParseError::ExpectedCString(b'&')));
     }
 
     #[test]
     fn errors_when_cstr_byte_is_missing() {
         let err = parse_error(b"*2\r\n\r\nGET\r\n$5\r\nMYKEY\r\n");
-        assert!(matches!(err, ParseError::MissingFirstByte));
+        assert!(matches!(err, RequestParseError::MissingFirstByte));
     }
 
     /// Push `input` and assert the parser reports "need more bytes" (incomplete).
@@ -332,14 +332,14 @@ mod tests {
     fn errors_on_missing_crlf_after_cstr_payload() {
         // "GET" is 3 bytes, but it's followed by "XX" instead of "\r\n".
         let err = parse_error(b"*1\r\n$3\r\nGETXX");
-        assert!(matches!(err, ParseError::MissingCrlf));
+        assert!(matches!(err, RequestParseError::MissingCrlf));
     }
 
     #[test]
     fn errors_on_partial_crlf_after_cstr_payload() {
         // "GET" is 3 bytes, followed by "\rX": has the \r but not the \n.
         let err = parse_error(b"*1\r\n$3\r\nGET\rX");
-        assert!(matches!(err, ParseError::MissingCrlf));
+        assert!(matches!(err, RequestParseError::MissingCrlf));
     }
 
     #[test]
@@ -380,7 +380,7 @@ mod tests {
         // Header says 3, but the body is "HELLO" (5). We read "HEL", then the
         // trailing check lands on "LO" instead of "\r\n".
         let err = parse_error(b"*1\r\n$3\r\nHELLO\r\n");
-        assert!(matches!(err, ParseError::MissingCrlf));
+        assert!(matches!(err, RequestParseError::MissingCrlf));
     }
 
     #[test]
@@ -388,7 +388,7 @@ mod tests {
         // Header says 5, but the body is "HI" (2). We read 5 bytes ("HI\r\nZ",
         // swallowing the real CRLF), then the trailing check lands on "ZZ".
         let err = parse_error(b"*1\r\n$5\r\nHI\r\nZZZ");
-        assert!(matches!(err, ParseError::MissingCrlf));
+        assert!(matches!(err, RequestParseError::MissingCrlf));
     }
 
     #[test]
@@ -418,14 +418,14 @@ mod tests {
 
         let err = push_parse(&mut parser, b"&2\r\n$3\r\nGET\r\n")
             .expect_err("bad array byte should error");
-        assert!(matches!(err, ParseError::ExpectedArray(b'&')));
+        assert!(matches!(err, RequestParseError::ExpectedArray(b'&')));
 
         // Even a perfectly valid request is rejected after the parser is poisoned.
         parser.push_bytes(b"*1\r\n$4\r\nPING\r\n");
         let err = parser
             .parse_next()
             .expect_err("poisoned parser should reject further input");
-        assert!(matches!(err, ParseError::Poisoned));
+        assert!(matches!(err, RequestParseError::Poisoned));
     }
 
     #[test]
@@ -450,7 +450,7 @@ mod tests {
         let err = push_parse(&mut parser, b"*2\r\n&3\r\nGET\r\n")
             .expect_err("bad cstr byte should error");
 
-        assert!(matches!(err, ParseError::ExpectedCString(b'&')));
+        assert!(matches!(err, RequestParseError::ExpectedCString(b'&')));
         assert!(parser.poisoned);
         assert_eq!(parser.arr_len, Some(2)); // array header committed
         assert_eq!(parser.g_idx, 4); // advanced past "*2\r\n" only
@@ -465,7 +465,7 @@ mod tests {
         let err = push_parse(&mut parser, b"*1\r\n$3\r\nGETXX")
             .expect_err("bad cstr terminator should error");
 
-        assert!(matches!(err, ParseError::MissingCrlf));
+        assert!(matches!(err, RequestParseError::MissingCrlf));
         assert!(parser.poisoned);
         assert_eq!(parser.arr_len, Some(1));
         assert_eq!(parser.g_idx, 4); // cstr not committed, so g_idx stays at the header
@@ -480,7 +480,7 @@ mod tests {
         let err = push_parse(&mut parser, b"*2\r\n$3\r\nGET\r\n&5\r\nMYKEY\r\n")
             .expect_err("bad second cstr byte should error");
 
-        assert!(matches!(err, ParseError::ExpectedCString(b'&')));
+        assert!(matches!(err, RequestParseError::ExpectedCString(b'&')));
         assert!(parser.poisoned);
         assert_eq!(parser.arr_len, Some(2));
         assert_eq!(parser.g_idx, 13); // advanced past "*2\r\n$3\r\nGET\r\n"

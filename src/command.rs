@@ -41,12 +41,20 @@ impl Command {
         }
     }
 
+    pub fn is_set(&self) -> bool {
+        self.name() == SET_STR
+    }
+
+    pub fn is_del(&self) -> bool {
+        self.name() == DEL_STR
+    }
+
     pub fn is_get(&self) -> bool {
         self.name() == GET_STR
     }
 
-    pub fn is_write(&self) -> bool {
-        self.name() == SET_STR || self.name() == DEL_STR
+    pub fn is_write_op(&self) -> bool {
+        self.is_del() || self.is_set()
     }
 
     pub fn apply(self, key_store: &mut KeyStore<Bytes, Bytes>) -> Response<&[u8]> {
@@ -265,12 +273,14 @@ mod tests {
     #[test]
     fn classifies_read_and_write_commands() {
         assert!(Command::Get(b"k".to_vec()).is_get());
-        assert!(!Command::Get(b"k".to_vec()).is_write());
+        assert!(!Command::Get(b"k".to_vec()).is_set());
+        assert!(!Command::Get(b"k".to_vec()).is_del());
+        assert!(!Command::Get(b"k".to_vec()).is_write_op());
 
         assert!(!Command::Set(b"k".to_vec(), b"v".to_vec()).is_get());
-        assert!(Command::Set(b"k".to_vec(), b"v".to_vec()).is_write());
+        assert!(Command::Set(b"k".to_vec(), b"v".to_vec()).is_write_op());
 
         assert!(!Command::Del(vec![b"k".to_vec()]).is_get());
-        assert!(Command::Del(vec![b"k".to_vec()]).is_write());
+        assert!(Command::Del(vec![b"k".to_vec()]).is_write_op());
     }
 }
