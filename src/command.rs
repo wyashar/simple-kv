@@ -3,15 +3,15 @@ use std::fmt;
 use thiserror::Error;
 
 use crate::command::CommandError::{TooFewArguments, TooManyArguments, UnrecognizedCommand};
+use crate::key_store::KeyStore;
 use crate::request::Request;
 use crate::response::Response;
 use crate::util::Bytes;
-use crate::key_store::KeyStore;
 
-const GET_STR: &'static str = "GET";
-const SET_STR: &'static str = "SET";
-const DEL_STR: &'static str = "DEL";
-const COMMAND_NAMES: [&'static str; 3] = [GET_STR, SET_STR, DEL_STR];
+const GET_STR: &str = "GET";
+const SET_STR: &str = "SET";
+const DEL_STR: &str = "DEL";
+const COMMAND_NAMES: [&str; 3] = [GET_STR, SET_STR, DEL_STR];
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -64,16 +64,13 @@ impl Command {
                 .map(|value| Response::Cstr(value.as_slice()))
                 .unwrap_or(Response::Null),
             Self::Del(keys) => {
-                let count = keys
-                    .iter()
-                    .filter_map(|k| key_store.del(k))
-                    .count();
+                let count = keys.iter().filter_map(|k| key_store.del(k)).count();
                 Response::Integer(count as i64)
-            },
+            }
             Self::Set(key, value) => {
                 let _ = key_store.insert(key, value);
                 Response::Ok
-            },
+            }
         }
     }
 
