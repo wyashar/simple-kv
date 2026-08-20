@@ -3,13 +3,15 @@ use std::fmt;
 use thiserror::Error;
 
 use crate::command::CommandError::{TooFewArguments, TooManyArguments, UnrecognizedCommand};
+use crate::key_store::KeyStore;
 use crate::request::Request;
+use crate::response::Response;
 use crate::util::Bytes;
 
-const GET_STR: &'static str = "GET";
-const SET_STR: &'static str = "SET";
-const DEL_STR: &'static str = "DEL";
-const COMMAND_NAMES: [&'static str; 3] = [GET_STR, SET_STR, DEL_STR];
+const GET_STR: &str = "GET";
+const SET_STR: &str = "SET";
+const DEL_STR: &str = "DEL";
+const COMMAND_NAMES: [&str; 3] = [GET_STR, SET_STR, DEL_STR];
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -36,6 +38,39 @@ impl Command {
             Self::Del(_) => DEL_STR,
             Self::Set(_, _) => SET_STR,
             Self::Get(_) => GET_STR,
+        }
+    }
+
+    pub fn is_set(&self) -> bool {
+        self.name() == SET_STR
+    }
+
+    pub fn is_del(&self) -> bool {
+        self.name() == DEL_STR
+    }
+
+    pub fn is_get(&self) -> bool {
+        self.name() == GET_STR
+    }
+
+    pub fn is_write_op(&self) -> bool {
+        self.is_del() || self.is_set()
+    }
+
+    pub fn apply(self, key_store: &mut KeyStore<Bytes, Bytes>) -> Response<&[u8]> {
+        match self {
+            Self::Get(key) => key_store
+                .get(&key)
+                .map(|value| Response::Cstr(value.as_slice()))
+                .unwrap_or(Response::Null),
+            Self::Del(keys) => {
+                let count = keys.iter().filter_map(|k| key_store.del(k)).count();
+                Response::Integer(count as i64)
+            }
+            Self::Set(key, value) => {
+                let _ = key_store.insert(key, value);
+                Response::Ok
+            }
         }
     }
 
@@ -207,10 +242,10 @@ mod tests {
     }
 
     fn assert_round_trips(command: Command) {
-        let mut parser = crate::request::RequestParser::default();
-        parser.push_bytes(&command.to_bytes());
-        let request = parser
-            .parse_next()
+        let mut requests =
+            crate::request::RequestReader::new(std::io::Cursor::new(command.to_bytes()));
+        let request = requests
+            .read_next()
             .expect("serialized command should be valid RESP")
             .expect("serialized command should be a complete request");
 
@@ -230,5 +265,19 @@ mod tests {
     #[test]
     fn round_trips_del() {
         assert_round_trips(Command::Del(vec![b"k1".to_vec(), b"k2".to_vec()]));
+    }
+
+    #[test]
+    fn classifies_read_and_write_commands() {
+        assert!(Command::Get(b"k".to_vec()).is_get());
+        assert!(!Command::Get(b"k".to_vec()).is_set());
+        assert!(!Command::Get(b"k".to_vec()).is_del());
+        assert!(!Command::Get(b"k".to_vec()).is_write_op());
+
+        assert!(!Command::Set(b"k".to_vec(), b"v".to_vec()).is_get());
+        assert!(Command::Set(b"k".to_vec(), b"v".to_vec()).is_write_op());
+
+        assert!(!Command::Del(vec![b"k".to_vec()]).is_get());
+        assert!(Command::Del(vec![b"k".to_vec()]).is_write_op());
     }
 }

@@ -1,13 +1,14 @@
 use std::fmt;
 
 use log::debug;
+use std::io::BufRead;
 use thiserror::Error;
 
-use crate::request::ParseError::{
+use crate::request::RequestParseError::{
     ArrayTooLong, CStringTooLong, ExpectedArray, ExpectedCString, MissingCrlf, MissingFirstByte,
-    Poisoned,
+    Poisoned, UnexpectedEof,
 };
-use crate::util::{parse_line, Bytes, Parsed, CRLF, CSTRING_BYTE, MAX_COMPLEX_STRING_LENGTH};
+use crate::util::{Bytes, CRLF, CSTRING_BYTE, MAX_COMPLEX_STRING_LENGTH, Parsed, parse_line};
 
 const MAX_ARRAY_LENGTH: usize = 1024 * 1024;
 const ARRAY_BYTE: u8 = b'*';
@@ -18,16 +19,21 @@ pub struct Request {
 }
 
 #[derive(Default)]
-pub struct RequestParser {
-    g_idx: usize,
-    arr_len: Option<usize>,
-    q_buff: Vec<u8>,
-    cs_buff: Vec<Bytes>,
+struct RequestDecoder {
+    cursor: usize,
+    expected_arg_count: Option<usize>,
+    buffer: Vec<u8>,
+    args: Vec<Bytes>,
     poisoned: bool,
 }
 
+pub struct RequestReader<R> {
+    reader: R,
+    decoder: RequestDecoder,
+}
+
 #[derive(Error, Debug)]
-pub enum ParseError {
+pub enum RequestParseError {
     #[error("request was empty; no first byte present")]
     MissingFirstByte,
     #[error("expected top-level array (*), got {ch:?}", ch = *.0 as char)]
@@ -38,37 +44,89 @@ pub enum ParseError {
     InvalidUtf8(#[from] std::str::Utf8Error),
     #[error("invalid integer in payload")]
     InvalidInt(#[from] std::num::ParseIntError),
+    #[error("failed to read request: {0}")]
+    Io(#[from] std::io::Error),
     #[error("array length {0} exceeds maximum {MAX_ARRAY_LENGTH}")]
     ArrayTooLong(usize),
     #[error("expected complex string ($), got {ch:?}", ch = *.0 as char)]
     ExpectedCString(u8),
     #[error("bulk string length {0} exceeds maximum {MAX_COMPLEX_STRING_LENGTH}")]
     CStringTooLong(usize),
-    #[error("parser was reused after a previous error")]
+    #[error("decoder was reused after a previous error")]
     Poisoned,
+    #[error("unexpected EOF during request parsing")]
+    UnexpectedEof,
 }
 
-impl RequestParser {
-    pub fn push_bytes(&mut self, bytes: &[u8]) {
-        self.q_buff.extend_from_slice(bytes);
+impl<R> RequestReader<R> {
+    pub fn new(reader: R) -> Self {
+        Self {
+            reader,
+            decoder: RequestDecoder::default(),
+        }
     }
 
-    pub fn parse_next(&mut self) -> Result<Option<Request>, ParseError> {
+    pub fn get_reader_mut(&mut self) -> &mut R {
+        &mut self.reader
+    }
+
+    pub fn into_inner(self) -> R {
+        self.reader
+    }
+}
+
+impl<R: BufRead> RequestReader<R> {
+    pub fn read_next(&mut self) -> Result<Option<Request>, RequestParseError> {
+        loop {
+            if let Some(request) = self.decoder.decode_next()? {
+                return Ok(Some(request));
+            }
+
+            let num_bytes_read = {
+                let bytes = self.reader.fill_buf()?;
+                if bytes.is_empty() {
+                    self.decoder.validate_eof()?;
+                    return Ok(None);
+                }
+
+                self.decoder.buffer.extend_from_slice(bytes);
+                bytes.len()
+            };
+
+            self.reader.consume(num_bytes_read);
+        }
+    }
+}
+
+impl RequestDecoder {
+    fn validate_eof(&self) -> Result<(), RequestParseError> {
         if self.poisoned {
             return Err(Poisoned);
         }
 
-        let result = self.parse_next_internal();
+        if !self.buffer.is_empty() {
+            return Err(UnexpectedEof);
+        }
+
+        Ok(())
+    }
+
+    fn decode_next(&mut self) -> Result<Option<Request>, RequestParseError> {
+        if self.poisoned {
+            return Err(Poisoned);
+        }
+
+        let result = self.decode_buffered();
         if result.is_err() {
             self.poisoned = true;
         }
         result
     }
 
-    fn parse_next_internal(&mut self) -> Result<Option<Request>, ParseError> {
-        if self.arr_len.is_none() {
+    fn decode_buffered(&mut self) -> Result<Option<Request>, RequestParseError> {
+        if self.expected_arg_count.is_none() {
             let Some(arr_header) = Self::parse_header(
-                &self.q_buff,
+                &self.buffer,
                 ARRAY_BYTE,
                 MAX_ARRAY_LENGTH,
                 ExpectedArray,
@@ -79,15 +137,19 @@ impl RequestParser {
                 return Ok(None);
             };
 
-            self.arr_len = Some(arr_header.data);
-            self.g_idx = arr_header.num_bytes_parsed;
+            self.expected_arg_count = Some(arr_header.data);
+            self.cursor = arr_header.num_bytes_parsed;
         }
 
-        while self.cs_buff.len() < self.arr_len.expect("arr_len set above") {
+        while self.args.len()
+            < self
+                .expected_arg_count
+                .expect("expected_arg_count set above")
+        {
             let Some(cstr) = self.parse_cstr()? else {
                 return Ok(None);
             };
-            self.cs_buff.push(cstr);
+            self.args.push(cstr);
         }
 
         Ok(Some(Request {
@@ -95,13 +157,13 @@ impl RequestParser {
         }))
     }
 
-    fn parse_cstr(&mut self) -> Result<Option<Bytes>, ParseError> {
-        if self.g_idx >= self.q_buff.len() {
+    fn parse_cstr(&mut self) -> Result<Option<Bytes>, RequestParseError> {
+        if self.cursor >= self.buffer.len() {
             return Ok(None);
         }
 
         let Some(cstr_header) = Self::parse_header(
-            &self.q_buff[self.g_idx..],
+            &self.buffer[self.cursor..],
             CSTRING_BYTE,
             MAX_COMPLEX_STRING_LENGTH,
             ExpectedCString,
@@ -113,39 +175,39 @@ impl RequestParser {
         };
 
         let cstr_len = cstr_header.data;
-        let data_start = self.g_idx + cstr_header.num_bytes_parsed;
+        let data_start = self.cursor + cstr_header.num_bytes_parsed;
         let cstr_crlf_idx = data_start + cstr_len + 2;
 
-        if cstr_crlf_idx > self.q_buff.len() {
+        if cstr_crlf_idx > self.buffer.len() {
             debug!("cstr payload not fully buffered yet, waiting");
             return Ok(None);
         }
 
-        if &self.q_buff[data_start + cstr_len..cstr_crlf_idx] != CRLF {
+        if &self.buffer[data_start + cstr_len..cstr_crlf_idx] != CRLF {
             return Err(MissingCrlf);
         }
 
-        let cstr = self.q_buff[data_start..data_start + cstr_len].to_owned();
+        let cstr = self.buffer[data_start..data_start + cstr_len].to_owned();
 
-        self.g_idx = cstr_crlf_idx;
+        self.cursor = cstr_crlf_idx;
         Ok(Some(cstr))
     }
 
     fn take_request(&mut self) -> Vec<Bytes> {
-        self.q_buff.drain(..self.g_idx);
-        self.g_idx = 0;
-        self.arr_len = None;
+        self.buffer.drain(..self.cursor);
+        self.cursor = 0;
+        self.expected_arg_count = None;
 
-        std::mem::take(&mut self.cs_buff)
+        std::mem::take(&mut self.args)
     }
 
     fn parse_header(
         bytes: &[u8],
         header_byte: u8,
         max_header_len: usize,
-        expected_error: fn(u8) -> ParseError,
-        too_long_error: fn(usize) -> ParseError,
-    ) -> Result<Option<Parsed<usize>>, ParseError> {
+        expected_error: fn(u8) -> RequestParseError,
+        too_long_error: fn(usize) -> RequestParseError,
+    ) -> Result<Option<Parsed<usize>>, RequestParseError> {
         let Some(header) = parse_line(bytes) else {
             debug!("missing CRLF in header payload");
             return Ok(None);
@@ -214,17 +276,16 @@ impl Request {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufReader, Cursor};
 
-    fn push_parse(parser: &mut RequestParser, bytes: &[u8]) -> Result<Option<Request>, ParseError> {
-        parser.push_bytes(bytes);
-        parser.parse_next()
+    fn read_bytes(bytes: &[u8]) -> Result<Option<Request>, RequestParseError> {
+        RequestReader::new(Cursor::new(bytes)).read_next()
     }
 
     /// Assert that parsing `input` yields a complete request whose bulk strings
     /// match `expected`.
     fn assert_parses(input: &[u8], expected: Vec<Bytes>) {
-        let mut parser = RequestParser::default();
-        let request = push_parse(&mut parser, input)
+        let request = read_bytes(input)
             .expect("parse should succeed")
             .expect("request should be complete");
 
@@ -258,8 +319,7 @@ mod tests {
     /// Parse `input` into a request and assert re-serializing it yields the same
     /// bytes we started with.
     fn assert_round_trips(input: &[u8]) {
-        let mut parser = RequestParser::default();
-        let request = push_parse(&mut parser, input)
+        let request = read_bytes(input)
             .expect("parse should succeed")
             .expect("request should be complete");
 
@@ -282,93 +342,87 @@ mod tests {
     }
 
     /// Parse `input` and return the parse error it produces.
-    fn parse_error(input: &[u8]) -> ParseError {
-        let mut parser = RequestParser::default();
-        push_parse(&mut parser, input).expect_err("parse should fail")
+    fn parse_error(input: &[u8]) -> RequestParseError {
+        read_bytes(input).expect_err("parse should fail")
     }
 
     #[test]
     fn errors_when_array_byte_is_wrong() {
         let err = parse_error(b"&2\r\n$3\r\nGET\r\n$5\r\nMYKEY\r\n");
-        assert!(matches!(err, ParseError::ExpectedArray(b'&')));
+        assert!(matches!(err, RequestParseError::ExpectedArray(b'&')));
     }
 
     #[test]
     fn errors_when_array_byte_is_missing() {
         let err = parse_error(b"\r\n$3\r\nGET\r\n$5\r\nMYKEY\r\n");
-        assert!(matches!(err, ParseError::MissingFirstByte));
+        assert!(matches!(err, RequestParseError::MissingFirstByte));
     }
 
     #[test]
     fn errors_when_cstr_byte_is_wrong() {
         let err = parse_error(b"*2\r\n&3\r\nGET\r\n$5\r\nMYKEY\r\n");
-        assert!(matches!(err, ParseError::ExpectedCString(b'&')));
+        assert!(matches!(err, RequestParseError::ExpectedCString(b'&')));
     }
 
     #[test]
     fn errors_when_cstr_byte_is_missing() {
         let err = parse_error(b"*2\r\n\r\nGET\r\n$5\r\nMYKEY\r\n");
-        assert!(matches!(err, ParseError::MissingFirstByte));
+        assert!(matches!(err, RequestParseError::MissingFirstByte));
     }
 
-    /// Push `input` and assert the parser reports "need more bytes" (incomplete).
-    fn assert_incomplete(input: &[u8]) {
-        let mut parser = RequestParser::default();
-        let result = push_parse(&mut parser, input).expect("parse should not error");
-        assert!(result.is_none(), "expected incomplete, got a full request");
-    }
-
-    #[test]
-    fn array_header_without_crlf_is_incomplete() {
-        assert_incomplete(b"*2");
+    /// Deserialize `input` and assert it ends before a complete request arrives.
+    fn assert_unexpected_eof(input: &[u8]) {
+        assert!(matches!(
+            read_bytes(input),
+            Err(RequestParseError::UnexpectedEof)
+        ));
     }
 
     #[test]
-    fn cstr_header_without_crlf_is_incomplete() {
-        assert_incomplete(b"*2\r\n$3");
+    fn array_header_without_crlf_is_unexpected_eof() {
+        assert_unexpected_eof(b"*2");
+    }
+
+    #[test]
+    fn cstr_header_without_crlf_is_unexpected_eof() {
+        assert_unexpected_eof(b"*2\r\n$3");
     }
 
     #[test]
     fn errors_on_missing_crlf_after_cstr_payload() {
         // "GET" is 3 bytes, but it's followed by "XX" instead of "\r\n".
         let err = parse_error(b"*1\r\n$3\r\nGETXX");
-        assert!(matches!(err, ParseError::MissingCrlf));
+        assert!(matches!(err, RequestParseError::MissingCrlf));
     }
 
     #[test]
     fn errors_on_partial_crlf_after_cstr_payload() {
         // "GET" is 3 bytes, followed by "\rX": has the \r but not the \n.
         let err = parse_error(b"*1\r\n$3\r\nGET\rX");
-        assert!(matches!(err, ParseError::MissingCrlf));
+        assert!(matches!(err, RequestParseError::MissingCrlf));
     }
 
     #[test]
-    fn array_header_incomplete_until_crlf_arrives() {
-        let mut parser = RequestParser::default();
+    fn parses_array_header_split_across_buffer_fills() {
+        let reader = BufReader::with_capacity(2, Cursor::new(b"*1\r\n$4\r\nPING\r\n"));
+        let mut requests = RequestReader::new(reader);
 
-        // No CRLF at all yet.
-        assert!(push_parse(&mut parser, b"*2").expect("no error").is_none());
-        // Ends in a lone '\r' — still not a full CRLF.
-        assert!(push_parse(&mut parser, b"\r").expect("no error").is_none());
-        // CRLF now complete, but there are no bulk strings yet.
-        assert!(push_parse(&mut parser, b"\n").expect("no error").is_none());
+        let request = requests
+            .read_next()
+            .expect("parse should succeed")
+            .expect("request should be complete");
+
+        assert_eq!(request.cstrs, vec![b"PING".to_vec()]);
     }
 
     #[test]
     fn completes_request_fed_in_chunks() {
-        let mut parser = RequestParser::default();
+        let reader =
+            BufReader::with_capacity(4, Cursor::new(b"*2\r\n$3\r\nGET\r\n$5\r\nMYKEY\r\n"));
+        let mut requests = RequestReader::new(reader);
 
-        assert!(push_parse(&mut parser, b"*2\r\n")
-            .expect("no error")
-            .is_none());
-        assert!(push_parse(&mut parser, b"$3\r\nGET")
-            .expect("no error")
-            .is_none());
-        assert!(push_parse(&mut parser, b"\r\n$5\r\nMYKE")
-            .expect("no error")
-            .is_none());
-
-        let request = push_parse(&mut parser, b"Y\r\n")
+        let request = requests
+            .read_next()
             .expect("no error")
             .expect("request should now be complete");
 
@@ -380,7 +434,7 @@ mod tests {
         // Header says 3, but the body is "HELLO" (5). We read "HEL", then the
         // trailing check lands on "LO" instead of "\r\n".
         let err = parse_error(b"*1\r\n$3\r\nHELLO\r\n");
-        assert!(matches!(err, ParseError::MissingCrlf));
+        assert!(matches!(err, RequestParseError::MissingCrlf));
     }
 
     #[test]
@@ -388,124 +442,163 @@ mod tests {
         // Header says 5, but the body is "HI" (2). We read 5 bytes ("HI\r\nZ",
         // swallowing the real CRLF), then the trailing check lands on "ZZ".
         let err = parse_error(b"*1\r\n$5\r\nHI\r\nZZZ");
-        assert!(matches!(err, ParseError::MissingCrlf));
+        assert!(matches!(err, RequestParseError::MissingCrlf));
     }
 
     #[test]
-    fn declared_length_too_long_past_buffer_is_incomplete() {
+    fn declared_length_too_long_past_buffer_is_unexpected_eof() {
         // Header says 5, but only "HI\r\n" follows, so the declared payload runs
-        // past the buffer end — treated as incomplete, waiting for more bytes.
-        assert_incomplete(b"*1\r\n$5\r\nHI\r\n");
+        // past the buffer end before EOF.
+        assert_unexpected_eof(b"*1\r\n$5\r\nHI\r\n");
     }
 
     #[test]
     fn partial_array_header_leaves_state_uncommitted() {
-        let mut parser = RequestParser::default();
+        let mut requests = RequestReader::new(Cursor::new(b"*5\r"));
 
         // "*5\r" — no full CRLF yet, so the array header can't be committed.
-        let result = push_parse(&mut parser, b"*5\r").expect("no error");
+        let result = requests.read_next();
 
-        assert!(result.is_none());
-        assert_eq!(parser.arr_len, None);
-        assert_eq!(parser.g_idx, 0);
-        assert_eq!(parser.q_buff, b"*5\r".to_vec());
-        assert!(parser.cs_buff.is_empty());
+        assert!(matches!(result, Err(RequestParseError::UnexpectedEof)));
+        assert_eq!(requests.decoder.expected_arg_count, None);
+        assert_eq!(requests.decoder.cursor, 0);
+        assert_eq!(requests.decoder.buffer, b"*5\r".to_vec());
+        assert!(requests.decoder.args.is_empty());
     }
 
     #[test]
-    fn parser_is_poisoned_after_an_error() {
-        let mut parser = RequestParser::default();
+    fn decoder_is_poisoned_after_an_error() {
+        let mut requests = RequestReader::new(Cursor::new(b"&2\r\n$3\r\nGET\r\n"));
 
-        let err = push_parse(&mut parser, b"&2\r\n$3\r\nGET\r\n")
+        let err = requests
+            .read_next()
             .expect_err("bad array byte should error");
-        assert!(matches!(err, ParseError::ExpectedArray(b'&')));
+        assert!(matches!(err, RequestParseError::ExpectedArray(b'&')));
 
-        // Even a perfectly valid request is rejected after the parser is poisoned.
-        parser.push_bytes(b"*1\r\n$4\r\nPING\r\n");
-        let err = parser
-            .parse_next()
+        let err = requests
+            .read_next()
             .expect_err("poisoned parser should reject further input");
-        assert!(matches!(err, ParseError::Poisoned));
+        assert!(matches!(err, RequestParseError::Poisoned));
+    }
+
+    #[test]
+    fn validate_eof_succeeds_when_decoder_is_empty() {
+        let decoder = RequestDecoder::default();
+
+        assert!(decoder.validate_eof().is_ok());
+    }
+
+    #[test]
+    fn validate_eof_succeeds_after_complete_request_is_consumed() {
+        let mut requests = RequestReader::new(Cursor::new(b"*1\r\n$4\r\nPING\r\n"));
+        requests
+            .read_next()
+            .expect("parse should succeed")
+            .expect("request should be complete");
+
+        assert!(requests.decoder.validate_eof().is_ok());
+    }
+
+    #[test]
+    fn read_next_errors_when_request_ends_incomplete() {
+        assert!(matches!(
+            read_bytes(b"*2\r\n$3\r\nGET\r\n"),
+            Err(RequestParseError::UnexpectedEof)
+        ));
+    }
+
+    #[test]
+    fn validate_eof_reports_poisoned_before_buffered_data() {
+        let mut requests = RequestReader::new(Cursor::new(b"&1\r\n"));
+        let _ = requests.read_next().expect_err("parse should fail");
+
+        assert!(matches!(
+            requests.decoder.validate_eof(),
+            Err(RequestParseError::Poisoned)
+        ));
     }
 
     #[test]
     fn full_array_header_commits_state() {
-        let mut parser = RequestParser::default();
+        let mut requests = RequestReader::new(Cursor::new(b"*5\r\n"));
 
         // "*5\r\n" — a complete array header, but no bulk strings yet.
-        let result = push_parse(&mut parser, b"*5\r\n").expect("no error");
+        let result = requests.read_next();
 
-        assert!(result.is_none());
-        assert_eq!(parser.arr_len, Some(5));
-        assert_eq!(parser.g_idx, 4); // crlf pos (2) + 2, i.e. past "*5\r\n"
-        assert_eq!(parser.q_buff, b"*5\r\n".to_vec());
-        assert!(parser.cs_buff.is_empty());
+        assert!(matches!(result, Err(RequestParseError::UnexpectedEof)));
+        assert_eq!(requests.decoder.expected_arg_count, Some(5));
+        assert_eq!(requests.decoder.cursor, 4); // past "*5\r\n"
+        assert_eq!(requests.decoder.buffer, b"*5\r\n".to_vec());
+        assert!(requests.decoder.args.is_empty());
     }
 
     #[test]
     fn good_array_then_bad_cstr_header_state() {
-        let mut parser = RequestParser::default();
+        let mut requests = RequestReader::new(Cursor::new(b"*2\r\n&3\r\nGET\r\n"));
 
         // Array header is fine, but the first bulk string uses '&' not '$'.
-        let err = push_parse(&mut parser, b"*2\r\n&3\r\nGET\r\n")
+        let err = requests
+            .read_next()
             .expect_err("bad cstr byte should error");
 
-        assert!(matches!(err, ParseError::ExpectedCString(b'&')));
-        assert!(parser.poisoned);
-        assert_eq!(parser.arr_len, Some(2)); // array header committed
-        assert_eq!(parser.g_idx, 4); // advanced past "*2\r\n" only
-        assert!(parser.cs_buff.is_empty()); // no bulk string committed
+        assert!(matches!(err, RequestParseError::ExpectedCString(b'&')));
+        assert!(requests.decoder.poisoned);
+        assert_eq!(requests.decoder.expected_arg_count, Some(2));
+        assert_eq!(requests.decoder.cursor, 4); // advanced past "*2\r\n" only
+        assert!(requests.decoder.args.is_empty());
     }
 
     #[test]
     fn good_array_good_cstr_header_bad_body_state() {
-        let mut parser = RequestParser::default();
+        let mut requests = RequestReader::new(Cursor::new(b"*1\r\n$3\r\nGETXX"));
 
         // "$3" then "GET" is fine, but the payload is terminated by "XX".
-        let err = push_parse(&mut parser, b"*1\r\n$3\r\nGETXX")
+        let err = requests
+            .read_next()
             .expect_err("bad cstr terminator should error");
 
-        assert!(matches!(err, ParseError::MissingCrlf));
-        assert!(parser.poisoned);
-        assert_eq!(parser.arr_len, Some(1));
-        assert_eq!(parser.g_idx, 4); // cstr not committed, so g_idx stays at the header
-        assert!(parser.cs_buff.is_empty());
+        assert!(matches!(err, RequestParseError::MissingCrlf));
+        assert!(requests.decoder.poisoned);
+        assert_eq!(requests.decoder.expected_arg_count, Some(1));
+        assert_eq!(requests.decoder.cursor, 4);
+        assert!(requests.decoder.args.is_empty());
     }
 
     #[test]
     fn good_array_one_cstr_then_bad_next_cstr_state() {
-        let mut parser = RequestParser::default();
+        let mut requests = RequestReader::new(Cursor::new(b"*2\r\n$3\r\nGET\r\n&5\r\nMYKEY\r\n"));
 
         // First bulk string "GET" parses cleanly; the second uses '&' not '$'.
-        let err = push_parse(&mut parser, b"*2\r\n$3\r\nGET\r\n&5\r\nMYKEY\r\n")
+        let err = requests
+            .read_next()
             .expect_err("bad second cstr byte should error");
 
-        assert!(matches!(err, ParseError::ExpectedCString(b'&')));
-        assert!(parser.poisoned);
-        assert_eq!(parser.arr_len, Some(2));
-        assert_eq!(parser.g_idx, 13); // advanced past "*2\r\n$3\r\nGET\r\n"
-        assert_eq!(parser.cs_buff, vec![b"GET".to_vec()]); // first string committed
+        assert!(matches!(err, RequestParseError::ExpectedCString(b'&')));
+        assert!(requests.decoder.poisoned);
+        assert_eq!(requests.decoder.expected_arg_count, Some(2));
+        assert_eq!(requests.decoder.cursor, 13);
+        assert_eq!(requests.decoder.args, vec![b"GET".to_vec()]);
     }
 
     #[test]
-    fn parse_next_yields_second_request_without_more_bytes() {
-        let mut parser = RequestParser::default();
-        parser.push_bytes(b"*2\r\n$3\r\nGET\r\n$1\r\na\r\n*2\r\n$3\r\nGET\r\n$1\r\nb\r\n");
+    fn read_next_yields_second_buffered_request_without_more_bytes() {
+        let reader = Cursor::new(b"*2\r\n$3\r\nGET\r\n$1\r\na\r\n*2\r\n$3\r\nGET\r\n$1\r\nb\r\n");
+        let mut requests = RequestReader::new(reader);
 
-        let first = parser
-            .parse_next()
+        let first = requests
+            .read_next()
             .expect("no error")
             .expect("first request should be complete");
         assert_eq!(first.cstrs, vec![b"GET".to_vec(), b"a".to_vec()]);
 
-        let second = parser
-            .parse_next()
+        let second = requests
+            .read_next()
             .expect("no error")
             .expect("second request should already be buffered");
         assert_eq!(second.cstrs, vec![b"GET".to_vec(), b"b".to_vec()]);
 
         assert!(
-            parser.parse_next().expect("no error").is_none(),
+            requests.read_next().expect("no error").is_none(),
             "no third request"
         );
     }
