@@ -25,6 +25,19 @@ impl AppendOnlyFile {
         self.file.seek(SeekFrom::Start(0))?;
         Ok(BufReader::new(&self.file))
     }
+
+    pub fn try_clone(&self) -> std::io::Result<Self> {
+        Ok(Self {
+            file: self.file.try_clone()?,
+        })
+    }
+
+    // TODO: in the future, we should handle a more robust sync mechanism
+    // TODO: we need to decide what the server will do in the event that the sync fails
+    // TODO: for now, we will just panic if the sync fails
+    pub fn sync(&self) {
+        self.file.sync_all().expect("file sync did not work");
+    }
 }
 
 #[cfg(test)]

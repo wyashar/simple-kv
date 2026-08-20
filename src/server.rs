@@ -1,6 +1,7 @@
 use std::io::{BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
+use std::thread;
 
 use log::{info, warn};
 use thiserror::Error;
@@ -8,6 +9,7 @@ use thiserror::Error;
 use crate::append_only_file::AppendOnlyFile;
 use crate::command::{Command, CommandError};
 use crate::config::Config;
+use crate::config::FsyncPolicy;
 use crate::key_store::KeyStore;
 use crate::request::{RequestParseError, RequestReader};
 use crate::response::Response;
@@ -48,6 +50,11 @@ pub fn serve(listener: TcpListener, config: Config) {
     let mut key_store =
         restore_key_store(&mut aof).expect("failed to restore key store from append-only file");
 
+    let sync_aof = aof
+        .try_clone()
+        .expect("failed to clone append-only file handle");
+    spawn_sync_thread(sync_aof, config.fsync_policy);
+
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => match stream.peer_addr() {
@@ -62,6 +69,15 @@ pub fn serve(listener: TcpListener, config: Config) {
             }
         }
     }
+}
+
+fn spawn_sync_thread(aof: AppendOnlyFile, fsync_policy: FsyncPolicy) {
+    thread::spawn(move || {
+        loop {
+            thread::sleep(fsync_policy.duration());
+            aof.sync();
+        }
+    });
 }
 
 fn restore_key_store(
