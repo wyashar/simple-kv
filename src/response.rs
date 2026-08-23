@@ -1,19 +1,28 @@
 use std::fmt;
+use std::io::BufRead;
 
 use log::debug;
 use thiserror::Error;
 
 use crate::response::ParseError::{
-    CStringTooLong, InvalidCStringLength, MissingCrlf, Poisoned, UnexpectedPrefix, UnexpectedSstr,
+    CStringTooLong, InvalidArrayLength, InvalidCStringLength, MissingCrlf, Poisoned, UnexpectedEof,
+    UnexpectedPrefix, UnexpectedSstr,
 };
-use crate::util::{parse_line, Bytes, CRLF, CSTRING_BYTE, MAX_COMPLEX_STRING_LENGTH};
+use crate::util::{Bytes, CRLF, CSTRING_BYTE, MAX_COMPLEX_STRING_LENGTH, Parsed, parse_line};
 
 const SSTR_BYTE: u8 = b'+';
 const ERROR_BYTE: u8 = b'-';
 const INTEGER_BYTE: u8 = b':';
+const ARRAY_BYTE: u8 = b'*';
 const NULL_CSTR_LEN: i64 = -1;
 const OK_BODY: &[u8] = b"OK";
-const PREFIX_BYTES: [u8; 4] = [SSTR_BYTE, ERROR_BYTE, CSTRING_BYTE, INTEGER_BYTE];
+const PREFIX_BYTES: [u8; 5] = [
+    SSTR_BYTE,
+    ERROR_BYTE,
+    CSTRING_BYTE,
+    INTEGER_BYTE,
+    ARRAY_BYTE,
+];
 
 #[derive(Debug, PartialEq)]
 pub enum Response<T = Bytes> {
@@ -22,53 +31,7 @@ pub enum Response<T = Bytes> {
     Cstr(T),
     Null,
     Integer(i64),
-}
-
-impl<B: AsRef<[u8]>> Response<B> {
-    pub fn prefix_byte(&self) -> u8 {
-        match self {
-            Self::Ok => SSTR_BYTE,
-            Self::Error(_) => ERROR_BYTE,
-            Self::Cstr(_) | Self::Null => CSTRING_BYTE,
-            Self::Integer(_) => INTEGER_BYTE,
-        }
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = vec![self.prefix_byte()];
-        match self {
-            Self::Ok => buf.extend_from_slice(OK_BODY),
-            Self::Error(msg) => buf.extend_from_slice(msg.as_bytes()),
-            Self::Cstr(bytes) => {
-                let bytes = bytes.as_ref();
-                buf.extend_from_slice(bytes.len().to_string().as_bytes());
-                buf.extend_from_slice(CRLF);
-                buf.extend_from_slice(bytes);
-            }
-            Self::Null => buf.extend_from_slice(b"-1"),
-            Self::Integer(n) => buf.extend_from_slice(n.to_string().as_bytes()),
-        }
-        buf.extend_from_slice(CRLF);
-        buf
-    }
-}
-
-impl<B: AsRef<[u8]>> fmt::Display for Response<B> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Ok => f.write_str("OK"),
-            Self::Error(msg) => write!(f, "{msg}"),
-            Self::Cstr(bytes) => write!(f, "{}", String::from_utf8_lossy(bytes.as_ref())),
-            Self::Null => f.write_str("(nil)"),
-            Self::Integer(n) => write!(f, "{n}"),
-        }
-    }
-}
-
-#[derive(Default)]
-pub struct ResponseParser {
-    q_buff: Vec<u8>,
-    poisoned: bool,
+    Array(Vec<Response<T>>),
 }
 
 #[derive(Error, Debug)]
@@ -87,43 +50,177 @@ pub enum ParseError {
     CStringTooLong(usize),
     #[error("invalid complex string length {0}")]
     InvalidCStringLength(i64),
-    #[error("parser was reused after a previous error")]
+    #[error("invalid array length {0}")]
+    InvalidArrayLength(i64),
+    #[error("failed to read response: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("decoder was reused after a previous error")]
     Poisoned,
+    #[error("unexpected EOF during response parsing")]
+    UnexpectedEof,
 }
 
-impl ResponseParser {
-    pub fn push_bytes(&mut self, bytes: &[u8]) {
-        self.q_buff.extend_from_slice(bytes);
+pub struct ResponseReader<R> {
+    reader: R,
+    decoder: ResponseDecoder,
+}
+
+#[derive(Default)]
+struct ResponseDecoder {
+    buffer: Vec<u8>,
+    poisoned: bool,
+}
+
+impl<B: AsRef<[u8]>> Response<B> {
+    pub fn prefix_byte(&self) -> u8 {
+        match self {
+            Self::Ok => SSTR_BYTE,
+            Self::Error(_) => ERROR_BYTE,
+            Self::Cstr(_) | Self::Null => CSTRING_BYTE,
+            Self::Integer(_) => INTEGER_BYTE,
+            Self::Array(_) => ARRAY_BYTE,
+        }
     }
 
-    pub fn parse_next(&mut self) -> Result<Option<Response>, ParseError> {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = vec![self.prefix_byte()];
+        match self {
+            Self::Ok => buf.extend_from_slice(OK_BODY),
+            Self::Error(msg) => buf.extend_from_slice(msg.as_bytes()),
+            Self::Cstr(bytes) => {
+                let bytes = bytes.as_ref();
+                buf.extend_from_slice(bytes.len().to_string().as_bytes());
+                buf.extend_from_slice(CRLF);
+                buf.extend_from_slice(bytes);
+            }
+            Self::Null => buf.extend_from_slice(b"-1"),
+            Self::Integer(n) => buf.extend_from_slice(n.to_string().as_bytes()),
+            Self::Array(responses) => {
+                buf.extend_from_slice(responses.len().to_string().as_bytes());
+                buf.extend_from_slice(CRLF);
+                for response in responses {
+                    buf.extend_from_slice(&response.to_bytes());
+                }
+                return buf;
+            }
+        }
+        buf.extend_from_slice(CRLF);
+        buf
+    }
+}
+
+impl<B: AsRef<[u8]>> fmt::Display for Response<B> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ok => f.write_str("OK"),
+            Self::Error(msg) => write!(f, "{msg}"),
+            Self::Cstr(bytes) => write!(f, "{}", String::from_utf8_lossy(bytes.as_ref())),
+            Self::Null => f.write_str("(nil)"),
+            Self::Integer(n) => write!(f, "{n}"),
+            Self::Array(responses) => {
+                for (index, response) in responses.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{response}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl<R> ResponseReader<R> {
+    pub fn new(reader: R) -> Self {
+        Self {
+            reader,
+            decoder: ResponseDecoder::default(),
+        }
+    }
+
+    pub fn get_reader_mut(&mut self) -> &mut R {
+        &mut self.reader
+    }
+
+    pub fn into_inner(self) -> R {
+        self.reader
+    }
+}
+
+impl<R: BufRead> ResponseReader<R> {
+    pub fn read_next(&mut self) -> Result<Option<Response>, ParseError> {
+        loop {
+            if let Some(response) = self.decoder.decode_next()? {
+                return Ok(Some(response));
+            }
+
+            let num_bytes_read = {
+                let bytes = self.reader.fill_buf()?;
+                if bytes.is_empty() {
+                    self.decoder.validate_eof()?;
+                    return Ok(None);
+                }
+
+                self.decoder.buffer.extend_from_slice(bytes);
+                bytes.len()
+            };
+
+            self.reader.consume(num_bytes_read);
+        }
+    }
+}
+
+impl ResponseDecoder {
+    fn validate_eof(&self) -> Result<(), ParseError> {
         if self.poisoned {
             return Err(Poisoned);
         }
 
-        let result = self.parse_next_internal();
+        if !self.buffer.is_empty() {
+            return Err(UnexpectedEof);
+        }
+
+        Ok(())
+    }
+
+    fn decode_next(&mut self) -> Result<Option<Response>, ParseError> {
+        if self.poisoned {
+            return Err(Poisoned);
+        }
+
+        let result = self.decode_buffered();
         if result.is_err() {
             self.poisoned = true;
         }
         result
     }
 
-    fn parse_next_internal(&mut self) -> Result<Option<Response>, ParseError> {
-        let Some(first) = self.q_buff.first().copied() else {
+    fn decode_buffered(&mut self) -> Result<Option<Response>, ParseError> {
+        let Some(parsed) = Self::parse_response(&self.buffer)? else {
+            return Ok(None);
+        };
+
+        self.buffer.drain(..parsed.num_bytes_parsed);
+        Ok(Some(parsed.data))
+    }
+
+    fn parse_response(bytes: &[u8]) -> Result<Option<Parsed<Response>>, ParseError> {
+        let Some(first) = bytes.first().copied() else {
             return Ok(None);
         };
 
         match first {
-            SSTR_BYTE => self.parse_sstr(),
-            ERROR_BYTE => self.parse_error(),
-            CSTRING_BYTE => self.parse_cstr(),
-            INTEGER_BYTE => self.parse_integer(),
+            SSTR_BYTE => Self::parse_sstr(bytes),
+            ERROR_BYTE => Self::parse_error(bytes),
+            CSTRING_BYTE => Self::parse_cstr(bytes),
+            INTEGER_BYTE => Self::parse_integer(bytes),
+            ARRAY_BYTE => Self::parse_array(bytes),
             other => Err(UnexpectedPrefix(other)),
         }
     }
 
-    fn parse_sstr(&mut self) -> Result<Option<Response>, ParseError> {
-        let Some(line) = parse_line(&self.q_buff) else {
+    fn parse_sstr(bytes: &[u8]) -> Result<Option<Parsed<Response>>, ParseError> {
+        let Some(line) = parse_line(bytes) else {
             debug!("sstr is missing CRLF, waiting");
             return Ok(None);
         };
@@ -134,42 +231,44 @@ impl ResponseParser {
             ));
         }
 
-        self.take(line.num_bytes_parsed);
-        Ok(Some(Response::Ok))
+        Ok(Some(Parsed::new(Response::Ok, line.num_bytes_parsed)))
     }
 
-    fn parse_error(&mut self) -> Result<Option<Response>, ParseError> {
-        let Some(line) = parse_line(&self.q_buff) else {
+    fn parse_error(bytes: &[u8]) -> Result<Option<Parsed<Response>>, ParseError> {
+        let Some(line) = parse_line(bytes) else {
             debug!("error string is missing CRLF, waiting");
             return Ok(None);
         };
 
         let msg = str::from_utf8(&line.data[1..])?.to_owned();
-        self.take(line.num_bytes_parsed);
-        Ok(Some(Response::Error(msg)))
+        Ok(Some(Parsed::new(
+            Response::Error(msg),
+            line.num_bytes_parsed,
+        )))
     }
 
-    fn parse_integer(&mut self) -> Result<Option<Response>, ParseError> {
-        let Some(line) = parse_line(&self.q_buff) else {
+    fn parse_integer(bytes: &[u8]) -> Result<Option<Parsed<Response>>, ParseError> {
+        let Some(line) = parse_line(bytes) else {
             debug!("integer is missing CRLF, waiting");
             return Ok(None);
         };
 
         let n: i64 = str::from_utf8(&line.data[1..])?.parse()?;
-        self.take(line.num_bytes_parsed);
-        Ok(Some(Response::Integer(n)))
+        Ok(Some(Parsed::new(
+            Response::Integer(n),
+            line.num_bytes_parsed,
+        )))
     }
 
-    fn parse_cstr(&mut self) -> Result<Option<Response>, ParseError> {
-        let Some(header) = parse_line(&self.q_buff) else {
+    fn parse_cstr(bytes: &[u8]) -> Result<Option<Parsed<Response>>, ParseError> {
+        let Some(header) = parse_line(bytes) else {
             debug!("cstr header payload is missing CRLF, waiting");
             return Ok(None);
         };
 
         let len: i64 = str::from_utf8(&header.data[1..])?.parse()?;
         if len == NULL_CSTR_LEN {
-            self.take(header.num_bytes_parsed);
-            return Ok(Some(Response::Null));
+            return Ok(Some(Parsed::new(Response::Null, header.num_bytes_parsed)));
         }
         if len < 0 {
             return Err(InvalidCStringLength(len));
@@ -183,22 +282,45 @@ impl ResponseParser {
         let data_start = header.num_bytes_parsed;
         let cstr_crlf_idx = data_start + len + 2;
 
-        if cstr_crlf_idx > self.q_buff.len() {
+        if cstr_crlf_idx > bytes.len() {
             debug!("cstr payload not fully buffered yet, waiting");
             return Ok(None);
         }
 
-        if &self.q_buff[data_start + len..cstr_crlf_idx] != CRLF {
+        if &bytes[data_start + len..cstr_crlf_idx] != CRLF {
             return Err(MissingCrlf);
         }
 
-        let cstr = self.q_buff[data_start..data_start + len].to_owned();
-        self.take(cstr_crlf_idx);
-        Ok(Some(Response::Cstr(cstr)))
+        let cstr = bytes[data_start..data_start + len].to_owned();
+        Ok(Some(Parsed::new(Response::Cstr(cstr), cstr_crlf_idx)))
     }
 
-    fn take(&mut self, num_bytes: usize) {
-        self.q_buff.drain(..num_bytes);
+    fn parse_array(bytes: &[u8]) -> Result<Option<Parsed<Response>>, ParseError> {
+        let Some(header) = parse_line(bytes) else {
+            debug!("array header is missing CRLF, waiting");
+            return Ok(None);
+        };
+
+        let len: i64 = str::from_utf8(&header.data[1..])?.parse()?;
+        if len < 0 {
+            return Err(InvalidArrayLength(len));
+        }
+
+        let mut responses = Vec::with_capacity(len as usize);
+        let mut num_bytes_parsed = header.num_bytes_parsed;
+        for _ in 0..len {
+            let Some(parsed) = Self::parse_response(&bytes[num_bytes_parsed..])? else {
+                debug!("array element is not fully buffered yet, waiting");
+                return Ok(None);
+            };
+            num_bytes_parsed += parsed.num_bytes_parsed;
+            responses.push(parsed.data);
+        }
+
+        Ok(Some(Parsed::new(
+            Response::Array(responses),
+            num_bytes_parsed,
+        )))
     }
 }
 
@@ -207,33 +329,33 @@ mod tests {
     use super::*;
 
     fn push_parse(
-        parser: &mut ResponseParser,
+        parser: &mut ResponseDecoder,
         bytes: &[u8],
     ) -> Result<Option<Response>, ParseError> {
-        parser.push_bytes(bytes);
-        parser.parse_next()
+        parser.buffer.extend_from_slice(bytes);
+        parser.decode_next()
     }
 
     fn assert_parses(input: &[u8], expected: Response) {
-        let mut parser = ResponseParser::default();
+        let mut parser = ResponseDecoder::default();
         let response = push_parse(&mut parser, input)
             .expect("parse should succeed")
             .expect("response should be complete");
 
         assert_eq!(response, expected);
         assert!(
-            parser.parse_next().expect("no error").is_none(),
+            parser.decode_next().expect("no error").is_none(),
             "parser should have consumed the full input"
         );
     }
 
     fn parse_error(input: &[u8]) -> ParseError {
-        let mut parser = ResponseParser::default();
+        let mut parser = ResponseDecoder::default();
         push_parse(&mut parser, input).expect_err("parse should fail")
     }
 
     fn assert_incomplete(input: &[u8]) {
-        let mut parser = ResponseParser::default();
+        let mut parser = ResponseDecoder::default();
         let result = push_parse(&mut parser, input).expect("parse should not error");
         assert!(result.is_none(), "expected incomplete, got a full response");
     }
@@ -282,8 +404,52 @@ mod tests {
     }
 
     #[test]
+    fn parses_array() {
+        assert_parses(
+            b"*3\r\n$5\r\nvalue\r\n$-1\r\n:2\r\n",
+            Response::Array(vec![
+                Response::Cstr(b"value".to_vec()),
+                Response::Null,
+                Response::Integer(2),
+            ]),
+        );
+    }
+
+    #[test]
+    fn parses_nested_array() {
+        assert_parses(
+            b"*2\r\n+OK\r\n*2\r\n$5\r\nvalue\r\n:2\r\n",
+            Response::Array(vec![
+                Response::Ok,
+                Response::Array(vec![
+                    Response::Cstr(b"value".to_vec()),
+                    Response::Integer(2),
+                ]),
+            ]),
+        );
+    }
+
+    #[test]
+    fn incomplete_array_does_not_consume_buffered_elements() {
+        let mut parser = ResponseDecoder::default();
+        assert!(
+            push_parse(&mut parser, b"*2\r\n$3\r\none\r\n")
+                .expect("no error")
+                .is_none()
+        );
+
+        assert_eq!(
+            push_parse(&mut parser, b"$3\r\ntwo\r\n").expect("no error"),
+            Some(Response::Array(vec![
+                Response::Cstr(b"one".to_vec()),
+                Response::Cstr(b"two".to_vec()),
+            ]))
+        );
+    }
+
+    #[test]
     fn empty_cstr_is_not_null() {
-        let mut parser = ResponseParser::default();
+        let mut parser = ResponseDecoder::default();
         assert_eq!(
             push_parse(&mut parser, b"$0\r\n\r\n").unwrap(),
             Some(Response::Cstr(vec![]))
@@ -316,11 +482,13 @@ mod tests {
 
     #[test]
     fn completes_cstr_fed_in_chunks() {
-        let mut parser = ResponseParser::default();
+        let mut parser = ResponseDecoder::default();
 
-        assert!(push_parse(&mut parser, b"$5\r\n")
-            .expect("no error")
-            .is_none());
+        assert!(
+            push_parse(&mut parser, b"$5\r\n")
+                .expect("no error")
+                .is_none()
+        );
         assert!(push_parse(&mut parser, b"hel").expect("no error").is_none());
 
         let response = push_parse(&mut parser, b"lo\r\n")
@@ -331,19 +499,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_next_yields_second_response_without_more_bytes() {
-        let mut parser = ResponseParser::default();
-        parser.push_bytes(b"+OK\r\n:1\r\n");
+    fn decode_next_yields_second_response_without_more_bytes() {
+        let mut parser = ResponseDecoder::default();
+        parser.buffer.extend_from_slice(b"+OK\r\n:1\r\n");
 
-        assert_eq!(parser.parse_next().unwrap(), Some(Response::Ok));
-        assert_eq!(parser.parse_next().unwrap(), Some(Response::Integer(1)));
-        assert!(parser.parse_next().unwrap().is_none());
+        assert_eq!(parser.decode_next().unwrap(), Some(Response::Ok));
+        assert_eq!(parser.decode_next().unwrap(), Some(Response::Integer(1)));
+        assert!(parser.decode_next().unwrap().is_none());
     }
 
     #[test]
     fn errors_on_unexpected_prefix() {
-        let err = parse_error(b"*2\r\n");
-        assert!(matches!(err, ParseError::UnexpectedPrefix(b'*')));
+        let err = parse_error(b"?2\r\n");
+        assert!(matches!(err, ParseError::UnexpectedPrefix(b'?')));
     }
 
     #[test]
@@ -374,24 +542,40 @@ mod tests {
     }
 
     #[test]
-    fn parser_is_poisoned_after_an_error() {
-        let mut parser = ResponseParser::default();
+    fn decoder_is_poisoned_after_an_error() {
+        let mut parser = ResponseDecoder::default();
 
-        let err = push_parse(&mut parser, b"*1\r\n").expect_err("bad prefix should error");
-        assert!(matches!(err, ParseError::UnexpectedPrefix(b'*')));
+        let err = push_parse(&mut parser, b"?1\r\n").expect_err("bad prefix should error");
+        assert!(matches!(err, ParseError::UnexpectedPrefix(b'?')));
 
-        parser.push_bytes(b"+OK\r\n");
+        parser.buffer.extend_from_slice(b"+OK\r\n");
         let err = parser
-            .parse_next()
-            .expect_err("poisoned parser should reject further input");
+            .decode_next()
+            .expect_err("poisoned decoder should reject further input");
         assert!(matches!(err, ParseError::Poisoned));
     }
 
+    #[test]
+    fn reader_reads_buffered_responses_one_at_a_time() {
+        let mut reader = ResponseReader::new(std::io::Cursor::new(b"+OK\r\n:1\r\n"));
+
+        assert_eq!(reader.read_next().unwrap(), Some(Response::Ok));
+        assert_eq!(reader.read_next().unwrap(), Some(Response::Integer(1)));
+        assert_eq!(reader.read_next().unwrap(), None);
+    }
+
+    #[test]
+    fn reader_errors_on_incomplete_response_at_eof() {
+        let mut reader = ResponseReader::new(std::io::Cursor::new(b"$5\r\nhel"));
+
+        assert!(matches!(reader.read_next(), Err(ParseError::UnexpectedEof)));
+    }
+
     fn assert_round_trips(response: Response) {
-        let mut parser = ResponseParser::default();
-        parser.push_bytes(&response.to_bytes());
+        let mut parser = ResponseDecoder::default();
+        parser.buffer.extend_from_slice(&response.to_bytes());
         let parsed = parser
-            .parse_next()
+            .decode_next()
             .expect("serialized response should be valid RESP")
             .expect("serialized response should be complete");
         assert_eq!(parsed, response);

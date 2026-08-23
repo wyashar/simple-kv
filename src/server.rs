@@ -83,7 +83,7 @@ fn spawn_sync_thread(aof: AppendOnlyFile, fsync_policy: FsyncPolicy) {
 fn restore_key_store(
     aof: &mut AppendOnlyFile,
 ) -> Result<KeyStore<Bytes, Bytes>, KeyStoreRestoreError> {
-    let mut requests = RequestReader::new(aof.reader()?);
+    let mut requests = RequestReader::new(aof.get_file_content_from_start()?);
     let mut key_store = KeyStore::default();
 
     while let Some(request) = requests.read_next()? {
@@ -180,7 +180,7 @@ mod tests {
         );
 
         let mut contents = Vec::new();
-        aof.reader()
+        aof.get_file_content_from_start()
             .expect("reader creation should work")
             .read_to_end(&mut contents)
             .expect("read should work");
@@ -201,7 +201,7 @@ mod tests {
         );
 
         let mut contents = Vec::new();
-        aof.reader()
+        aof.get_file_content_from_start()
             .expect("reader creation should work")
             .read_to_end(&mut contents)
             .expect("read should work");
