@@ -80,7 +80,7 @@ fn init_logging() {
         .try_init();
 }
 
-fn spawn_server() -> SocketAddr {
+fn spawn_server_thread() -> SocketAddr {
     init_logging();
 
     let listener = TcpListener::bind(TEST_SERVER_ADDR).expect("failed to bind test server");
@@ -136,7 +136,7 @@ fn deserialize_response(stream: &mut TcpStream) -> Response {
 
 #[test]
 fn get_returns_cstr() {
-    let addr = spawn_server();
+    let addr = spawn_server_thread();
     let key = b"mykey".to_vec();
     let value = b"myval".to_vec();
 
@@ -152,7 +152,7 @@ fn get_returns_cstr() {
 
 #[test]
 fn set_returns_ok() {
-    let addr = spawn_server();
+    let addr = spawn_server_thread();
     assert_eq!(
         send_request(addr, &Command::Set(b"mykey".to_vec(), b"myval".to_vec())),
         Response::Ok
@@ -161,7 +161,7 @@ fn set_returns_ok() {
 
 #[test]
 fn del_returns_integer() {
-    let addr = spawn_server();
+    let addr = spawn_server_thread();
     assert_eq!(
         send_request(addr, &Command::Set(b"k1".to_vec(), b"v1".to_vec())),
         Response::Ok
@@ -178,7 +178,7 @@ fn del_returns_integer() {
 
 #[test]
 fn mset_stores_keys_retrievable_with_mget() {
-    let addr = spawn_server();
+    let addr = spawn_server_thread();
     let entries = vec![
         (b"k1".to_vec(), b"v1".to_vec()),
         (b"k2".to_vec(), b"v2".to_vec()),
@@ -206,7 +206,7 @@ fn mset_stores_keys_retrievable_with_mget() {
 
 #[test]
 fn mixed_commands_preserve_consistent_key_store_state() {
-    let addr = spawn_server();
+    let addr = spawn_server_thread();
 
     assert_eq!(
         send_request(addr, &Command::Get(b"missing".to_vec())),
@@ -305,7 +305,7 @@ fn mixed_commands_preserve_consistent_key_store_state() {
 
 #[test]
 fn unrecognized_command_returns_error() {
-    let addr = spawn_server();
+    let addr = spawn_server_thread();
     let Response::Error(msg) = send_raw(addr, b"*2\r\n$3\r\nFOO\r\n$5\r\nmykey\r\n") else {
         panic!("expected an error response");
     };
@@ -317,7 +317,7 @@ fn unrecognized_command_returns_error() {
 
 #[test]
 fn malformed_request_returns_error() {
-    let addr = spawn_server();
+    let addr = spawn_server_thread();
     let Response::Error(msg) = send_raw(addr, b"&2\r\n$3\r\nGET\r\n$5\r\nmykey\r\n") else {
         panic!("expected an error response");
     };
