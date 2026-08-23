@@ -8,7 +8,7 @@ use crate::response::ParseError::{
     CStringTooLong, InvalidArrayLength, InvalidCStringLength, MissingCrlf, Poisoned, UnexpectedEof,
     UnexpectedPrefix, UnexpectedSstr,
 };
-use crate::util::{Bytes, CRLF, CSTRING_BYTE, MAX_COMPLEX_STRING_LENGTH, parse_line};
+use crate::util::{Bytes, CRLF, CSTRING_BYTE, MAX_COMPLEX_STRING_LENGTH, Parsed, parse_line};
 
 const SSTR_BYTE: u8 = b'+';
 const ERROR_BYTE: u8 = b'-';
@@ -196,22 +196,31 @@ impl ResponseDecoder {
     }
 
     fn decode_buffered(&mut self) -> Result<Option<Response>, ParseError> {
-        let Some(first) = self.buffer.first().copied() else {
+        let Some(parsed) = Self::parse_response(&self.buffer)? else {
+            return Ok(None);
+        };
+
+        self.buffer.drain(..parsed.num_bytes_parsed);
+        Ok(Some(parsed.data))
+    }
+
+    fn parse_response(bytes: &[u8]) -> Result<Option<Parsed<Response>>, ParseError> {
+        let Some(first) = bytes.first().copied() else {
             return Ok(None);
         };
 
         match first {
-            SSTR_BYTE => self.parse_sstr(),
-            ERROR_BYTE => self.parse_error(),
-            CSTRING_BYTE => self.parse_cstr(),
-            INTEGER_BYTE => self.parse_integer(),
-            ARRAY_BYTE => self.parse_array(),
+            SSTR_BYTE => Self::parse_sstr(bytes),
+            ERROR_BYTE => Self::parse_error(bytes),
+            CSTRING_BYTE => Self::parse_cstr(bytes),
+            INTEGER_BYTE => Self::parse_integer(bytes),
+            ARRAY_BYTE => Self::parse_array(bytes),
             other => Err(UnexpectedPrefix(other)),
         }
     }
 
-    fn parse_sstr(&mut self) -> Result<Option<Response>, ParseError> {
-        let Some(line) = parse_line(&self.buffer) else {
+    fn parse_sstr(bytes: &[u8]) -> Result<Option<Parsed<Response>>, ParseError> {
+        let Some(line) = parse_line(bytes) else {
             debug!("sstr is missing CRLF, waiting");
             return Ok(None);
         };
@@ -222,42 +231,44 @@ impl ResponseDecoder {
             ));
         }
 
-        self.take(line.num_bytes_parsed);
-        Ok(Some(Response::Ok))
+        Ok(Some(Parsed::new(Response::Ok, line.num_bytes_parsed)))
     }
 
-    fn parse_error(&mut self) -> Result<Option<Response>, ParseError> {
-        let Some(line) = parse_line(&self.buffer) else {
+    fn parse_error(bytes: &[u8]) -> Result<Option<Parsed<Response>>, ParseError> {
+        let Some(line) = parse_line(bytes) else {
             debug!("error string is missing CRLF, waiting");
             return Ok(None);
         };
 
         let msg = str::from_utf8(&line.data[1..])?.to_owned();
-        self.take(line.num_bytes_parsed);
-        Ok(Some(Response::Error(msg)))
+        Ok(Some(Parsed::new(
+            Response::Error(msg),
+            line.num_bytes_parsed,
+        )))
     }
 
-    fn parse_integer(&mut self) -> Result<Option<Response>, ParseError> {
-        let Some(line) = parse_line(&self.buffer) else {
+    fn parse_integer(bytes: &[u8]) -> Result<Option<Parsed<Response>>, ParseError> {
+        let Some(line) = parse_line(bytes) else {
             debug!("integer is missing CRLF, waiting");
             return Ok(None);
         };
 
         let n: i64 = str::from_utf8(&line.data[1..])?.parse()?;
-        self.take(line.num_bytes_parsed);
-        Ok(Some(Response::Integer(n)))
+        Ok(Some(Parsed::new(
+            Response::Integer(n),
+            line.num_bytes_parsed,
+        )))
     }
 
-    fn parse_cstr(&mut self) -> Result<Option<Response>, ParseError> {
-        let Some(header) = parse_line(&self.buffer) else {
+    fn parse_cstr(bytes: &[u8]) -> Result<Option<Parsed<Response>>, ParseError> {
+        let Some(header) = parse_line(bytes) else {
             debug!("cstr header payload is missing CRLF, waiting");
             return Ok(None);
         };
 
         let len: i64 = str::from_utf8(&header.data[1..])?.parse()?;
         if len == NULL_CSTR_LEN {
-            self.take(header.num_bytes_parsed);
-            return Ok(Some(Response::Null));
+            return Ok(Some(Parsed::new(Response::Null, header.num_bytes_parsed)));
         }
         if len < 0 {
             return Err(InvalidCStringLength(len));
@@ -271,22 +282,21 @@ impl ResponseDecoder {
         let data_start = header.num_bytes_parsed;
         let cstr_crlf_idx = data_start + len + 2;
 
-        if cstr_crlf_idx > self.buffer.len() {
+        if cstr_crlf_idx > bytes.len() {
             debug!("cstr payload not fully buffered yet, waiting");
             return Ok(None);
         }
 
-        if &self.buffer[data_start + len..cstr_crlf_idx] != CRLF {
+        if &bytes[data_start + len..cstr_crlf_idx] != CRLF {
             return Err(MissingCrlf);
         }
 
-        let cstr = self.buffer[data_start..data_start + len].to_owned();
-        self.take(cstr_crlf_idx);
-        Ok(Some(Response::Cstr(cstr)))
+        let cstr = bytes[data_start..data_start + len].to_owned();
+        Ok(Some(Parsed::new(Response::Cstr(cstr), cstr_crlf_idx)))
     }
 
-    fn parse_array(&mut self) -> Result<Option<Response>, ParseError> {
-        let Some(header) = parse_line(&self.buffer) else {
+    fn parse_array(bytes: &[u8]) -> Result<Option<Parsed<Response>>, ParseError> {
+        let Some(header) = parse_line(bytes) else {
             debug!("array header is missing CRLF, waiting");
             return Ok(None);
         };
@@ -299,26 +309,18 @@ impl ResponseDecoder {
         let mut responses = Vec::with_capacity(len as usize);
         let mut num_bytes_parsed = header.num_bytes_parsed;
         for _ in 0..len {
-            let remaining = self.buffer[num_bytes_parsed..].to_vec();
-            let remaining_len = remaining.len();
-            let mut decoder = ResponseDecoder {
-                buffer: remaining,
-                poisoned: false,
-            };
-            let Some(response) = decoder.decode_buffered()? else {
+            let Some(parsed) = Self::parse_response(&bytes[num_bytes_parsed..])? else {
                 debug!("array element is not fully buffered yet, waiting");
                 return Ok(None);
             };
-            num_bytes_parsed += remaining_len - decoder.buffer.len();
-            responses.push(response);
+            num_bytes_parsed += parsed.num_bytes_parsed;
+            responses.push(parsed.data);
         }
 
-        self.take(num_bytes_parsed);
-        Ok(Some(Response::Array(responses)))
-    }
-
-    fn take(&mut self, num_bytes: usize) {
-        self.buffer.drain(..num_bytes);
+        Ok(Some(Parsed::new(
+            Response::Array(responses),
+            num_bytes_parsed,
+        )))
     }
 }
 
@@ -409,6 +411,20 @@ mod tests {
                 Response::Cstr(b"value".to_vec()),
                 Response::Null,
                 Response::Integer(2),
+            ]),
+        );
+    }
+
+    #[test]
+    fn parses_nested_array() {
+        assert_parses(
+            b"*2\r\n+OK\r\n*2\r\n$5\r\nvalue\r\n:2\r\n",
+            Response::Array(vec![
+                Response::Ok,
+                Response::Array(vec![
+                    Response::Cstr(b"value".to_vec()),
+                    Response::Integer(2),
+                ]),
             ]),
         );
     }
