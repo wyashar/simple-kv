@@ -2,7 +2,9 @@ use std::fmt;
 
 use thiserror::Error;
 
-use crate::command::CommandError::{TooFewArguments, TooManyArguments, UnrecognizedCommand};
+use crate::command::CommandError::{
+    TooFewArguments, TooManyArguments, UnevenArgumentLength, UnrecognizedCommand,
+};
 use crate::key_store::KeyStore;
 use crate::request::Request;
 use crate::response::Response;
@@ -10,13 +12,17 @@ use crate::util::Bytes;
 
 const GET_STR: &str = "GET";
 const SET_STR: &str = "SET";
+const MGET_STR: &str = "MGET";
+const MSET_STR: &str = "MSET";
 const DEL_STR: &str = "DEL";
-const COMMAND_NAMES: [&str; 3] = [GET_STR, SET_STR, DEL_STR];
+const COMMAND_NAMES: [&str; 5] = [GET_STR, SET_STR, MGET_STR, MSET_STR, DEL_STR];
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
     Get(Bytes),
     Set(Bytes, Bytes),
+    MGet(Vec<Bytes>),
+    MSet(Vec<(Bytes, Bytes)>),
     Del(Vec<Bytes>),
 }
 
@@ -30,6 +36,8 @@ pub enum CommandError {
     TooFewArguments(usize),
     #[error("request had too many elements: {0}")]
     TooManyArguments(usize),
+    #[error("expected even length, got len: {0}")]
+    UnevenArgumentLength(usize),
 }
 
 impl Command {
@@ -38,6 +46,8 @@ impl Command {
             Self::Del(_) => DEL_STR,
             Self::Set(_, _) => SET_STR,
             Self::Get(_) => GET_STR,
+            Self::MGet(_) => MGET_STR,
+            Self::MSet(_) => MSET_STR,
         }
     }
 
@@ -53,8 +63,16 @@ impl Command {
         self.name() == GET_STR
     }
 
+    pub fn is_mset(&self) -> bool {
+        self.name() == MSET_STR
+    }
+
+    pub fn is_mget(&self) -> bool {
+        self.name() == MGET_STR
+    }
+
     pub fn is_write_op(&self) -> bool {
-        self.is_del() || self.is_set()
+        self.is_del() || self.is_set() || self.is_mset()
     }
 
     pub fn apply(self, key_store: &mut KeyStore<Bytes, Bytes>) -> Response<&[u8]> {
@@ -63,12 +81,28 @@ impl Command {
                 .get(&key)
                 .map(|value| Response::Cstr(value.as_slice()))
                 .unwrap_or(Response::Null),
+            Self::MGet(keys) => Response::Array(
+                keys.iter()
+                    .map(|key| {
+                        key_store
+                            .get(key)
+                            .map(|value| Response::Cstr(value.as_slice()))
+                            .unwrap_or(Response::Null)
+                    })
+                    .collect(),
+            ),
             Self::Del(keys) => {
                 let count = keys.iter().filter_map(|k| key_store.del(k)).count();
                 Response::Integer(count as i64)
             }
             Self::Set(key, value) => {
                 let _ = key_store.insert(key, value);
+                Response::Ok
+            }
+            Self::MSet(entries) => {
+                for (key, value) in entries {
+                    let _ = key_store.insert(key, value);
+                }
                 Response::Ok
             }
         }
@@ -81,6 +115,13 @@ impl Command {
             Self::Set(key, value) => {
                 parts.push(key);
                 parts.push(value);
+            }
+            Self::MGet(keys) => parts.extend(keys.iter().map(Bytes::as_slice)),
+            Self::MSet(entries) => {
+                for (key, value) in entries {
+                    parts.push(key);
+                    parts.push(value);
+                }
             }
             Self::Del(keys) => parts.extend(keys.iter().map(Bytes::as_slice)),
         }
@@ -108,6 +149,21 @@ impl fmt::Display for Command {
                 String::from_utf8_lossy(key),
                 String::from_utf8_lossy(value)
             )?,
+            Self::MGet(keys) => {
+                for key in keys {
+                    write!(f, " {}", String::from_utf8_lossy(key))?;
+                }
+            }
+            Self::MSet(entries) => {
+                for (key, value) in entries {
+                    write!(
+                        f,
+                        " {} {}",
+                        String::from_utf8_lossy(key),
+                        String::from_utf8_lossy(value)
+                    )?;
+                }
+            }
             Self::Del(keys) => {
                 for key in keys {
                     write!(f, " {}", String::from_utf8_lossy(key))?;
@@ -154,6 +210,22 @@ impl TryFrom<Request> for Command {
                     args.next().expect("len >= 2 checked above"),
                 ))
             }
+            MGET_STR => Ok(Self::MGet(args.collect())),
+            MSET_STR => {
+                if args.len() < 2 {
+                    return Err(TooFewArguments(total));
+                }
+                if args.len() % 2 != 0 {
+                    return Err(UnevenArgumentLength(args.len()));
+                }
+
+                let mut entries = Vec::with_capacity(args.len() / 2);
+                while let Some(key) = args.next() {
+                    let value = args.next().expect("even argument count checked above");
+                    entries.push((key, value));
+                }
+                Ok(Self::MSet(entries))
+            }
             DEL_STR => Ok(Self::Del(args.collect())),
             other => Err(UnrecognizedCommand(other.to_owned())),
         }
@@ -185,6 +257,25 @@ mod tests {
         assert_eq!(
             parse(&[b"SET", b"mykey", b"myval"]).unwrap(),
             Command::Set(b"mykey".to_vec(), b"myval".to_vec()),
+        );
+    }
+
+    #[test]
+    fn parses_mget() {
+        assert_eq!(
+            parse(&[b"MGET", b"k1", b"k2"]).unwrap(),
+            Command::MGet(vec![b"k1".to_vec(), b"k2".to_vec()]),
+        );
+    }
+
+    #[test]
+    fn parses_mset() {
+        assert_eq!(
+            parse(&[b"MSET", b"k1", b"v1", b"k2", b"v2"]).unwrap(),
+            Command::MSet(vec![
+                (b"k1".to_vec(), b"v1".to_vec()),
+                (b"k2".to_vec(), b"v2".to_vec()),
+            ]),
         );
     }
 
@@ -236,6 +327,14 @@ mod tests {
     }
 
     #[test]
+    fn mset_requires_complete_key_value_pairs() {
+        let err = parse(&[b"MSET", b"k1", b"v1", b"k2"])
+            .expect_err("MSET requires a value for every key");
+        assert!(matches!(err, CommandError::UnevenArgumentLength(3)));
+        assert_eq!(err.to_string(), "expected even length, got len: 3");
+    }
+
+    #[test]
     fn unrecognized_command_errors() {
         let err = parse(&[b"FOO", b"mykey"]).expect_err("FOO is not a command");
         assert!(matches!(err, CommandError::UnrecognizedCommand(name) if name == "FOO"));
@@ -263,6 +362,15 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_multi_key_commands() {
+        assert_round_trips(Command::MGet(vec![b"k1".to_vec(), b"k2".to_vec()]));
+        assert_round_trips(Command::MSet(vec![
+            (b"k1".to_vec(), b"v1".to_vec()),
+            (b"k2".to_vec(), b"v2".to_vec()),
+        ]));
+    }
+
+    #[test]
     fn round_trips_del() {
         assert_round_trips(Command::Del(vec![b"k1".to_vec(), b"k2".to_vec()]));
     }
@@ -279,5 +387,37 @@ mod tests {
 
         assert!(!Command::Del(vec![b"k".to_vec()]).is_get());
         assert!(Command::Del(vec![b"k".to_vec()]).is_write_op());
+
+        let mget = Command::MGet(vec![b"k".to_vec()]);
+        assert!(mget.is_mget());
+        assert!(!mget.is_mset());
+        assert!(!mget.is_write_op());
+
+        let mset = Command::MSet(vec![(b"k".to_vec(), b"v".to_vec())]);
+        assert!(mset.is_mset());
+        assert!(!mset.is_mget());
+        assert!(mset.is_write_op());
+    }
+
+    #[test]
+    fn applies_multi_key_commands() {
+        let mut key_store = KeyStore::default();
+        assert_eq!(
+            Command::MSet(vec![
+                (b"k1".to_vec(), b"v1".to_vec()),
+                (b"k2".to_vec(), b"v2".to_vec()),
+            ])
+            .apply(&mut key_store),
+            Response::Ok
+        );
+        assert_eq!(
+            Command::MGet(vec![b"k2".to_vec(), b"missing".to_vec(), b"k1".to_vec()])
+                .apply(&mut key_store),
+            Response::Array(vec![
+                Response::Cstr(b"v2".as_slice()),
+                Response::Null,
+                Response::Cstr(b"v1".as_slice()),
+            ])
+        );
     }
 }

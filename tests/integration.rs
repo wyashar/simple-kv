@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Child, Command as ProcessCommand, Stdio};
@@ -10,7 +10,7 @@ use tempfile::TempDir;
 
 use simple_kv::command::Command;
 use simple_kv::config::{Config, FsyncPolicy};
-use simple_kv::response::{Response, ResponseParser};
+use simple_kv::response::{Response, ResponseReader};
 use simple_kv::server;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
@@ -128,22 +128,10 @@ fn send_raw(addr: SocketAddr, bytes: &[u8]) -> Response {
 }
 
 fn deserialize_response(stream: &mut TcpStream) -> Response {
-    let mut parser = ResponseParser::default();
-    let mut buf = [0u8; 1024];
-
-    loop {
-        match parser.parse_next() {
-            Ok(Some(response)) => return response,
-            Ok(None) => {}
-            Err(e) => panic!("failed to parse server response: {e}"),
-        }
-
-        match stream.read(&mut buf) {
-            Ok(0) => panic!("server closed the connection before sending a response"),
-            Ok(n) => parser.push_bytes(&buf[..n]),
-            Err(e) => panic!("failed to read from server: {e}"),
-        }
-    }
+    ResponseReader::new(BufReader::new(stream))
+        .read_next()
+        .expect("failed to parse server response")
+        .expect("server closed the connection before sending a response")
 }
 
 #[test]
@@ -185,6 +173,133 @@ fn del_returns_integer() {
     assert_eq!(
         send_request(addr, &Command::Del(vec![b"k1".to_vec(), b"k2".to_vec()])),
         Response::Integer(2)
+    );
+}
+
+#[test]
+fn mset_stores_keys_retrievable_with_mget() {
+    let addr = spawn_server();
+    let entries = vec![
+        (b"k1".to_vec(), b"v1".to_vec()),
+        (b"k2".to_vec(), b"v2".to_vec()),
+        (b"k3".to_vec(), b"v3".to_vec()),
+        (b"k4".to_vec(), b"v4".to_vec()),
+    ];
+
+    assert_eq!(
+        send_request(addr, &Command::MSet(entries.clone())),
+        Response::Ok
+    );
+    assert_eq!(
+        send_request(
+            addr,
+            &Command::MGet(entries.iter().map(|(key, _)| key.clone()).collect())
+        ),
+        Response::Array(
+            entries
+                .into_iter()
+                .map(|(_, value)| Response::Cstr(value))
+                .collect()
+        )
+    );
+}
+
+#[test]
+fn mixed_commands_preserve_consistent_key_store_state() {
+    let addr = spawn_server();
+
+    assert_eq!(
+        send_request(addr, &Command::Get(b"missing".to_vec())),
+        Response::Null
+    );
+    assert_eq!(
+        send_request(addr, &Command::Set(b"alpha".to_vec(), b"one".to_vec())),
+        Response::Ok
+    );
+    assert_eq!(
+        send_request(
+            addr,
+            &Command::MSet(vec![
+                (b"alpha".to_vec(), b"two".to_vec()),
+                (b"beta".to_vec(), b"two".to_vec()),
+                (b"gamma".to_vec(), b"three".to_vec()),
+            ])
+        ),
+        Response::Ok
+    );
+    assert_eq!(
+        send_request(addr, &Command::Get(b"alpha".to_vec())),
+        Response::Cstr(b"two".to_vec())
+    );
+    assert_eq!(
+        send_request(
+            addr,
+            &Command::MGet(vec![
+                b"gamma".to_vec(),
+                b"missing".to_vec(),
+                b"beta".to_vec(),
+            ])
+        ),
+        Response::Array(vec![
+            Response::Cstr(b"three".to_vec()),
+            Response::Null,
+            Response::Cstr(b"two".to_vec()),
+        ])
+    );
+    assert_eq!(
+        send_request(
+            addr,
+            &Command::Del(vec![b"beta".to_vec(), b"missing".to_vec()])
+        ),
+        Response::Integer(1)
+    );
+    assert_eq!(
+        send_request(
+            addr,
+            &Command::MSet(vec![
+                (b"delta".to_vec(), b"four".to_vec()),
+                (b"epsilon".to_vec(), b"five".to_vec()),
+            ])
+        ),
+        Response::Ok
+    );
+    assert_eq!(
+        send_request(
+            addr,
+            &Command::Del(vec![
+                b"alpha".to_vec(),
+                b"gamma".to_vec(),
+                b"epsilon".to_vec(),
+            ])
+        ),
+        Response::Integer(3)
+    );
+    assert_eq!(
+        send_request(
+            addr,
+            &Command::MGet(vec![
+                b"alpha".to_vec(),
+                b"beta".to_vec(),
+                b"gamma".to_vec(),
+                b"delta".to_vec(),
+                b"epsilon".to_vec(),
+            ])
+        ),
+        Response::Array(vec![
+            Response::Null,
+            Response::Null,
+            Response::Null,
+            Response::Cstr(b"four".to_vec()),
+            Response::Null,
+        ])
+    );
+    assert_eq!(
+        send_request(addr, &Command::Set(b"delta".to_vec(), b"updated".to_vec())),
+        Response::Ok
+    );
+    assert_eq!(
+        send_request(addr, &Command::Get(b"delta".to_vec())),
+        Response::Cstr(b"updated".to_vec())
     );
 }
 

@@ -21,7 +21,7 @@ impl AppendOnlyFile {
         self.file.write_all(bytes)
     }
 
-    pub fn reader(&mut self) -> std::io::Result<BufReader<&File>> {
+    pub fn get_file_content_from_start(&mut self) -> std::io::Result<BufReader<&File>> {
         self.file.seek(SeekFrom::Start(0))?;
         Ok(BufReader::new(&self.file))
     }
@@ -114,7 +114,7 @@ mod tests {
         aof.append(b"pending data").expect("append should work");
 
         let mut contents = Vec::new();
-        aof.reader()
+        aof.get_file_content_from_start()
             .expect("reader creation should work")
             .read_to_end(&mut contents)
             .expect("read should work");
