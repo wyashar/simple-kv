@@ -215,7 +215,7 @@ impl TryFrom<Request> for Command {
                 if args.len() < 2 {
                     return Err(TooFewArguments(total));
                 }
-                if args.len() % 2 != 0 {
+                if !args.len().is_multiple_of(2) {
                     return Err(UnevenArgumentLength(args.len()));
                 }
 
