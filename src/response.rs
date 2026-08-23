@@ -34,6 +34,43 @@ pub enum Response<T = Bytes> {
     Array(Vec<Response<T>>),
 }
 
+#[derive(Error, Debug)]
+pub enum ParseError {
+    #[error("expected crlf")]
+    MissingCrlf,
+    #[error("invalid utf-8 in payload")]
+    InvalidUtf8(#[from] std::str::Utf8Error),
+    #[error("invalid integer in payload")]
+    InvalidInt(#[from] std::num::ParseIntError),
+    #[error("unexpected response prefix byte, expected one of {prefixes:?}, but got: {got:?}", prefixes = PREFIX_BYTES, got = *.0 as char)]
+    UnexpectedPrefix(u8),
+    #[error("expected sstr OK, got {0:?}")]
+    UnexpectedSstr(String),
+    #[error("complex string length {0} exceeds maximum {MAX_COMPLEX_STRING_LENGTH}")]
+    CStringTooLong(usize),
+    #[error("invalid complex string length {0}")]
+    InvalidCStringLength(i64),
+    #[error("invalid array length {0}")]
+    InvalidArrayLength(i64),
+    #[error("failed to read response: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("decoder was reused after a previous error")]
+    Poisoned,
+    #[error("unexpected EOF during response parsing")]
+    UnexpectedEof,
+}
+
+pub struct ResponseReader<R> {
+    reader: R,
+    decoder: ResponseDecoder,
+}
+
+#[derive(Default)]
+struct ResponseDecoder {
+    buffer: Vec<u8>,
+    poisoned: bool,
+}
+
 impl<B: AsRef<[u8]>> Response<B> {
     pub fn prefix_byte(&self) -> u8 {
         match self {
@@ -91,43 +128,6 @@ impl<B: AsRef<[u8]>> fmt::Display for Response<B> {
             }
         }
     }
-}
-
-#[derive(Default)]
-struct ResponseDecoder {
-    buffer: Vec<u8>,
-    poisoned: bool,
-}
-
-pub struct ResponseReader<R> {
-    reader: R,
-    decoder: ResponseDecoder,
-}
-
-#[derive(Error, Debug)]
-pub enum ParseError {
-    #[error("expected crlf")]
-    MissingCrlf,
-    #[error("invalid utf-8 in payload")]
-    InvalidUtf8(#[from] std::str::Utf8Error),
-    #[error("invalid integer in payload")]
-    InvalidInt(#[from] std::num::ParseIntError),
-    #[error("unexpected response prefix byte, expected one of {prefixes:?}, but got: {got:?}", prefixes = PREFIX_BYTES, got = *.0 as char)]
-    UnexpectedPrefix(u8),
-    #[error("expected sstr OK, got {0:?}")]
-    UnexpectedSstr(String),
-    #[error("complex string length {0} exceeds maximum {MAX_COMPLEX_STRING_LENGTH}")]
-    CStringTooLong(usize),
-    #[error("invalid complex string length {0}")]
-    InvalidCStringLength(i64),
-    #[error("invalid array length {0}")]
-    InvalidArrayLength(i64),
-    #[error("failed to read response: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("decoder was reused after a previous error")]
-    Poisoned,
-    #[error("unexpected EOF during response parsing")]
-    UnexpectedEof,
 }
 
 impl<R> ResponseReader<R> {
