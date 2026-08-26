@@ -1,6 +1,8 @@
 use std::io::{BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::thread;
 
 use log::{info, warn};
@@ -9,13 +11,59 @@ use thiserror::Error;
 use crate::append_only_file::AppendOnlyFile;
 use crate::command::{Command, CommandError};
 use crate::config::Config;
-use crate::config::FsyncPolicy;
 use crate::key_store::KeyStore;
 use crate::request::{RequestParseError, RequestReader};
 use crate::response::Response;
 use crate::util::Bytes;
 
-const DEFAULT_AOF_PATH: &str = "simple-kv.aof";
+struct ServerState {
+    pub aof: AppendOnlyFile,
+    pub key_store: KeyStore<Bytes, Bytes>,
+}
+
+impl ServerState {
+    pub const DEFAULT_AOF_PATH: &str = "simple-kv.aof";
+
+    fn new(aof_path: &Path) -> Self {
+        let mut aof =
+            AppendOnlyFile::open(aof_path).expect("should be able to open append-only file");
+        let key_store = Self::keystore_from_aof(&mut aof)
+            .expect("should be able to restore key store from append-only file");
+
+        Self { aof, key_store }
+    }
+
+    fn clone_aof(&self) -> AppendOnlyFile {
+        self.aof
+            .try_clone()
+            .expect("should be able to clone append-only file")
+    }
+
+    fn keystore_from_aof(
+        aof: &mut AppendOnlyFile,
+    ) -> Result<KeyStore<Bytes, Bytes>, KeyStoreRestoreError> {
+        let mut requests = RequestReader::new(aof.get_file_content_from_start()?);
+        let mut key_store = KeyStore::default();
+
+        while let Some(request) = requests.read_next()? {
+            let command = Command::try_from(request)?;
+            let _ = command.apply(&mut key_store);
+        }
+
+        Ok(key_store)
+    }
+
+    fn apply_command(&mut self, command: Command) -> Response<Bytes> {
+        if command.is_write_op()
+            && let Err(err) = self.aof.append(&command.to_bytes())
+        {
+            warn!("failed to append command to AOF: {err}");
+            return Response::Error(err.to_string());
+        }
+
+        command.apply(&mut self.key_store)
+    }
+}
 
 #[derive(Debug, Error)]
 enum KeyStoreRestoreError {
@@ -38,7 +86,7 @@ pub fn serve(listener: TcpListener, config: Config) {
     let aof_path = config
         .aof_path
         .as_deref()
-        .unwrap_or_else(|| Path::new(DEFAULT_AOF_PATH));
+        .unwrap_or_else(|| Path::new(ServerState::DEFAULT_AOF_PATH));
 
     info!(
         "Server started on {addr}. FSYNC Policy is {:?}. AOF is at {}",
@@ -46,21 +94,14 @@ pub fn serve(listener: TcpListener, config: Config) {
         aof_path.display()
     );
 
-    let mut aof = AppendOnlyFile::open(aof_path).expect("failed to open append-only file");
-    let mut key_store =
-        restore_key_store(&mut aof).expect("failed to restore key store from append-only file");
-
-    let sync_aof = aof
-        .try_clone()
-        .expect("failed to clone append-only file handle");
-    spawn_sync_thread(sync_aof, config.fsync_policy);
+    let server_state: Arc<Mutex<ServerState>> = Arc::new(Mutex::new(ServerState::new(aof_path)));
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => match stream.peer_addr() {
                 Ok(peer) => {
                     info!("accepted connection from {peer}");
-                    handle_connection(stream, peer, &mut key_store, &mut aof);
+                    handle_client_connection(stream, peer, Arc::clone(&server_state));
                 }
                 Err(_) => info!("accepted connection from unknown peer"),
             },
@@ -71,89 +112,51 @@ pub fn serve(listener: TcpListener, config: Config) {
     }
 }
 
-fn spawn_sync_thread(aof: AppendOnlyFile, fsync_policy: FsyncPolicy) {
+// TODO: handle case where another thread has posioned the lock
+fn handle_client_connection(stream: TcpStream, peer: SocketAddr, ss: Arc<Mutex<ServerState>>) {
     thread::spawn(move || {
+        let mut requests = RequestReader::new(BufReader::new(stream));
+
         loop {
-            thread::sleep(fsync_policy.duration());
-            aof.sync();
+            let request = match requests.read_next() {
+                Ok(Some(request)) => request,
+                Ok(None) => {
+                    info!("{peer} disconnected");
+                    return;
+                }
+                Err(e) => {
+                    warn!("failed to read request from {peer}: {e}");
+                    send_response(
+                        requests.get_reader_mut().get_mut(),
+                        Response::Error(e.to_string()),
+                    );
+                    return;
+                }
+            };
+
+            match Command::try_from(request) {
+                Ok(command) => {
+                    info!("received command from {peer}: {command}");
+                    let response = {
+                        let mut server_state =
+                            ss.lock().expect("should be able to lock server state");
+                        server_state.apply_command(command)
+                    };
+                    send_response(requests.get_reader_mut().get_mut(), response);
+                }
+                Err(e) => {
+                    warn!("invalid command from {peer}: {e}");
+                    send_response(
+                        requests.get_reader_mut().get_mut(),
+                        Response::Error(e.to_string()),
+                    );
+                }
+            }
         }
     });
 }
 
-fn restore_key_store(
-    aof: &mut AppendOnlyFile,
-) -> Result<KeyStore<Bytes, Bytes>, KeyStoreRestoreError> {
-    let mut requests = RequestReader::new(aof.get_file_content_from_start()?);
-    let mut key_store = KeyStore::default();
-
-    while let Some(request) = requests.read_next()? {
-        let command = Command::try_from(request)?;
-        let _ = command.apply(&mut key_store);
-    }
-
-    Ok(key_store)
-}
-
-fn handle_connection(
-    stream: TcpStream,
-    peer: SocketAddr,
-    key_store: &mut KeyStore<Bytes, Bytes>,
-    aof: &mut AppendOnlyFile,
-) {
-    let mut requests = RequestReader::new(BufReader::new(stream));
-
-    loop {
-        let request = match requests.read_next() {
-            Ok(Some(request)) => request,
-            Ok(None) => {
-                info!("{peer} disconnected");
-                return;
-            }
-            Err(e) => {
-                warn!("failed to read request from {peer}: {e}");
-                send_response(
-                    requests.get_reader_mut().get_mut(),
-                    Response::Error(e.to_string()),
-                );
-                return;
-            }
-        };
-
-        match Command::try_from(request) {
-            Ok(command) => {
-                info!("received command from {peer}: {command}");
-                send_response(
-                    requests.get_reader_mut().get_mut(),
-                    apply_command(command, key_store, aof),
-                );
-            }
-            Err(e) => {
-                warn!("invalid command from {peer}: {e}");
-                send_response(
-                    requests.get_reader_mut().get_mut(),
-                    Response::Error(e.to_string()),
-                );
-            }
-        }
-    }
-}
-
-fn apply_command<'store>(
-    command: Command,
-    key_store: &'store mut KeyStore<Bytes, Bytes>,
-    aof: &mut AppendOnlyFile,
-) -> Response<&'store [u8]> {
-    if command.is_write_op()
-        && let Err(err) = aof.append(&command.to_bytes())
-    {
-        warn!("failed to append command to AOF: {err}");
-        return Response::Error(err.to_string());
-    }
-
-    command.apply(key_store)
-}
-
-fn send_response(stream: &mut TcpStream, response: Response<&[u8]>) {
+fn send_response(stream: &mut TcpStream, response: Response<Bytes>) {
     match stream.write_all(&response.to_bytes()) {
         Ok(()) => info!("sent response: {response}"),
         Err(e) => warn!("failed to send response: {e}"),
