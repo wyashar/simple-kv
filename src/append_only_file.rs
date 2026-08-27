@@ -36,7 +36,7 @@ impl AppendOnlyFile {
     // TODO: we need to decide what the server will do in the event that the sync fails
     // TODO: for now, we will just panic if the sync fails
     pub fn sync(&self) {
-        self.file.sync_all().expect("file sync did not work");
+        self.file.sync_all().expect("file sync should work");
     }
 }
 

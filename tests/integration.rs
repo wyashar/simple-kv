@@ -2,6 +2,7 @@ use std::io::{BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Child, Command as ProcessCommand, Stdio};
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -300,6 +301,60 @@ fn mixed_commands_preserve_consistent_key_store_state() {
     assert_eq!(
         send_request(addr, &Command::Get(b"delta".to_vec())),
         Response::Cstr(b"updated".to_vec())
+    );
+}
+
+#[test]
+fn handles_multiple_client_connections_concurrently() {
+    const CLIENT_COUNT: usize = 8;
+
+    let addr = spawn_server_thread();
+    let barrier = Arc::new(Barrier::new(CLIENT_COUNT));
+    let clients: Vec<_> = (0..CLIENT_COUNT)
+        .map(|client_id| {
+            let barrier = Arc::clone(&barrier);
+
+            thread::spawn(move || {
+                let mut stream = connect(addr);
+                let key = format!("key-{client_id}").into_bytes();
+                let value = format!("value-{client_id}").into_bytes();
+
+                barrier.wait();
+
+                stream
+                    .write_all(&Command::Set(key.clone(), value.clone()).to_bytes())
+                    .expect("failed to write SET request");
+                assert_eq!(deserialize_response(&mut stream), Response::Ok);
+
+                stream
+                    .write_all(&Command::Get(key.clone()).to_bytes())
+                    .expect("failed to write GET request");
+                assert_eq!(
+                    deserialize_response(&mut stream),
+                    Response::Cstr(value.clone())
+                );
+
+                (key, value)
+            })
+        })
+        .collect();
+
+    let entries: Vec<_> = clients
+        .into_iter()
+        .map(|client| client.join().expect("client thread panicked"))
+        .collect();
+
+    assert_eq!(
+        send_request(
+            addr,
+            &Command::MGet(entries.iter().map(|(key, _)| key.clone()).collect())
+        ),
+        Response::Array(
+            entries
+                .into_iter()
+                .map(|(_, value)| Response::Cstr(value))
+                .collect()
+        )
     );
 }
 

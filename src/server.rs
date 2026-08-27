@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
+use std::time::Duration;
 
 use log::{info, warn};
 use thiserror::Error;
@@ -37,6 +38,18 @@ impl ServerState {
         self.aof
             .try_clone()
             .expect("should be able to clone append-only file")
+    }
+
+    fn spawn_sync_thread(&self, sync_interval: Duration) {
+        let sync_aof = self.clone_aof();
+
+        thread::spawn(move || {
+            loop {
+                thread::sleep(sync_interval);
+                sync_aof.sync();
+                info!("synced AOF");
+            }
+        });
     }
 
     fn keystore_from_aof(
@@ -94,7 +107,9 @@ pub fn serve(listener: TcpListener, config: Config) {
         aof_path.display()
     );
 
-    let server_state: Arc<Mutex<ServerState>> = Arc::new(Mutex::new(ServerState::new(aof_path)));
+    let server_state = ServerState::new(aof_path);
+    server_state.spawn_sync_thread(config.fsync_policy.duration());
+    let server_state = Arc::new(Mutex::new(server_state));
 
     for stream in listener.incoming() {
         match stream {
@@ -172,39 +187,43 @@ mod tests {
     #[test]
     fn apply_command_appends_writes_to_aof() {
         let dir = TempDir::new().expect("temp dir creation should work");
-        let mut aof = AppendOnlyFile::open(dir.path().join("test.aof")).expect("open should work");
-        let mut key_store = KeyStore::default();
+        let mut server_state = ServerState::new(&dir.path().join("test.aof"));
         let command = Command::Set(b"key".to_vec(), b"value".to_vec());
         let expected = command.to_bytes();
 
-        assert_eq!(
-            apply_command(command, &mut key_store, &mut aof),
-            Response::Ok
-        );
+        assert_eq!(server_state.apply_command(command), Response::Ok);
 
         let mut contents = Vec::new();
-        aof.get_file_content_from_start()
+        server_state
+            .aof
+            .get_file_content_from_start()
             .expect("reader creation should work")
             .read_to_end(&mut contents)
             .expect("read should work");
         assert_eq!(contents, expected);
-        assert_eq!(key_store.get(&b"key".to_vec()), Some(&b"value".to_vec()));
+        assert_eq!(
+            server_state.key_store.get(&b"key".to_vec()),
+            Some(&b"value".to_vec())
+        );
     }
 
     #[test]
     fn apply_command_does_not_append_reads_to_aof() {
         let dir = TempDir::new().expect("temp dir creation should work");
-        let mut aof = AppendOnlyFile::open(dir.path().join("test.aof")).expect("open should work");
-        let mut key_store = KeyStore::default();
-        key_store.insert(b"key".to_vec(), b"value".to_vec());
+        let mut server_state = ServerState::new(&dir.path().join("test.aof"));
+        server_state
+            .key_store
+            .insert(b"key".to_vec(), b"value".to_vec());
 
         assert_eq!(
-            apply_command(Command::Get(b"key".to_vec()), &mut key_store, &mut aof),
-            Response::Cstr(b"value".as_slice())
+            server_state.apply_command(Command::Get(b"key".to_vec())),
+            Response::Cstr(b"value".to_vec())
         );
 
         let mut contents = Vec::new();
-        aof.get_file_content_from_start()
+        server_state
+            .aof
+            .get_file_content_from_start()
             .expect("reader creation should work")
             .read_to_end(&mut contents)
             .expect("read should work");
@@ -216,7 +235,7 @@ mod tests {
         let dir = TempDir::new().expect("temp dir creation should work");
         let mut aof = AppendOnlyFile::open(dir.path().join("test.aof")).expect("open should work");
 
-        let key_store = restore_key_store(&mut aof).expect("restore should work");
+        let key_store = ServerState::keystore_from_aof(&mut aof).expect("restore should work");
 
         assert!(key_store.get(&b"missing".to_vec()).is_none());
     }
@@ -235,7 +254,7 @@ mod tests {
             aof.append(&command.to_bytes()).expect("append should work");
         }
 
-        let key_store = restore_key_store(&mut aof).expect("restore should work");
+        let key_store = ServerState::keystore_from_aof(&mut aof).expect("restore should work");
 
         assert_eq!(key_store.get(&b"kept".to_vec()), Some(&b"new".to_vec()));
         assert!(key_store.get(&b"deleted".to_vec()).is_none());
@@ -248,7 +267,7 @@ mod tests {
         aof.append(b"*3\r\n$3\r\nSET\r\n")
             .expect("append should work");
 
-        let err = match restore_key_store(&mut aof) {
+        let err = match ServerState::keystore_from_aof(&mut aof) {
             Ok(_) => panic!("truncated request should fail"),
             Err(err) => err,
         };
@@ -266,7 +285,7 @@ mod tests {
         aof.append(b"*2\r\n$3\r\nFOO\r\n$3\r\nkey\r\n")
             .expect("append should work");
 
-        let err = match restore_key_store(&mut aof) {
+        let err = match ServerState::keystore_from_aof(&mut aof) {
             Ok(_) => panic!("invalid command should fail"),
             Err(err) => err,
         };
