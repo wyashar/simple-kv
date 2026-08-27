@@ -27,6 +27,8 @@ const COMMAND_NAMES: [&str; 7] = [
     EXPIRE_NAME,
 ];
 
+type CommandArgs = std::vec::IntoIter<Bytes>;
+
 #[derive(Debug, PartialEq)]
 pub enum Command {
     Get(Bytes),
@@ -93,6 +95,90 @@ impl Command {
 
     pub fn is_write_op(&self) -> bool {
         self.is_del() || self.is_set() || self.is_mset()
+    }
+
+    fn parse_get(mut args: CommandArgs, total: usize) -> Result<Self, CommandError> {
+        if args.len() == 0 {
+            return Err(TooFewArguments(total));
+        }
+        if args.len() > 1 {
+            return Err(TooManyArguments(total));
+        }
+
+        Ok(Self::Get(args.next().expect("one argument checked above")))
+    }
+
+    fn parse_set(mut args: CommandArgs, total: usize) -> Result<Self, CommandError> {
+        if args.len() < 2 {
+            return Err(TooFewArguments(total));
+        }
+        if args.len() > 2 {
+            return Err(TooManyArguments(total));
+        }
+
+        Ok(Self::Set(
+            args.next().expect("len >= 2 checked above"),
+            args.next().expect("len >= 2 checked above"),
+        ))
+    }
+
+    fn parse_mget(args: CommandArgs, total: usize) -> Result<Self, CommandError> {
+        if args.len() == 0 {
+            return Err(TooFewArguments(total));
+        }
+
+        Ok(Self::MGet(args.collect()))
+    }
+
+    fn parse_mset(mut args: CommandArgs, total: usize) -> Result<Self, CommandError> {
+        if args.len() < 2 {
+            return Err(TooFewArguments(total));
+        }
+        if !args.len().is_multiple_of(2) {
+            return Err(UnevenArgumentLength(args.len()));
+        }
+
+        let mut entries = Vec::with_capacity(args.len() / 2);
+        while let Some(key) = args.next() {
+            let value = args.next().expect("even argument count checked above");
+            entries.push((key, value));
+        }
+
+        Ok(Self::MSet(entries))
+    }
+
+    fn parse_del(args: CommandArgs, total: usize) -> Result<Self, CommandError> {
+        if args.len() == 0 {
+            return Err(TooFewArguments(total));
+        }
+
+        Ok(Self::Del(args.collect()))
+    }
+
+    fn parse_getall(args: CommandArgs, total: usize) -> Result<Self, CommandError> {
+        if args.len() != 0 {
+            return Err(TooManyArguments(total));
+        }
+
+        Ok(Self::GetAll)
+    }
+
+    fn parse_expire(mut args: CommandArgs, total: usize) -> Result<Self, CommandError> {
+        if args.len() < 2 {
+            return Err(TooFewArguments(total));
+        }
+        if args.len() > 2 {
+            return Err(TooManyArguments(total));
+        }
+
+        let key = args.next().expect("len == 2 checked above");
+        let expiration = args.next().expect("len == 2 checked above");
+        let expiration_str = str::from_utf8(&expiration)?;
+        let seconds = expiration_str
+            .parse()
+            .map_err(|_| CommandError::InvalidExpiration(expiration_str.to_owned()))?;
+
+        Ok(Self::Expire(key, seconds))
     }
 
     pub fn apply(self, key_store: &mut KeyStore<Bytes, Bytes>) -> Response<Bytes> {
@@ -229,78 +315,13 @@ impl TryFrom<Request> for Command {
         let command_name = str::from_utf8(&name_bytes)?;
 
         match command_name {
-            GET_NAME => {
-                if args.len() == 0 {
-                    return Err(TooFewArguments(total));
-                }
-                if args.len() > 1 {
-                    return Err(TooManyArguments(total));
-                }
-                Ok(Self::Get(args.next().expect("one argument checked above")))
-            }
-            SET_NAME => {
-                if args.len() < 2 {
-                    return Err(TooFewArguments(total));
-                }
-                if args.len() > 2 {
-                    return Err(TooManyArguments(total));
-                }
-
-                Ok(Self::Set(
-                    args.next().expect("len >= 2 checked above"),
-                    args.next().expect("len >= 2 checked above"),
-                ))
-            }
-            MGET_NAME => {
-                if args.len() == 0 {
-                    return Err(TooFewArguments(total));
-                }
-                Ok(Self::MGet(args.collect()))
-            }
-            MSET_NAME => {
-                if args.len() < 2 {
-                    return Err(TooFewArguments(total));
-                }
-                if !args.len().is_multiple_of(2) {
-                    return Err(UnevenArgumentLength(args.len()));
-                }
-
-                let mut entries = Vec::with_capacity(args.len() / 2);
-                while let Some(key) = args.next() {
-                    let value = args.next().expect("even argument count checked above");
-                    entries.push((key, value));
-                }
-                Ok(Self::MSet(entries))
-            }
-            DEL_NAME => {
-                if args.len() == 0 {
-                    return Err(TooFewArguments(total));
-                }
-                Ok(Self::Del(args.collect()))
-            }
-            GETALL_NAME => {
-                if args.len() != 0 {
-                    return Err(TooManyArguments(total));
-                }
-                Ok(Self::GetAll)
-            }
-            EXPIRE_NAME => {
-                if args.len() < 2 {
-                    return Err(TooFewArguments(total));
-                }
-                if args.len() > 2 {
-                    return Err(TooManyArguments(total));
-                }
-
-                let key = args.next().expect("len == 2 checked above");
-                let expiration = args.next().expect("len == 2 checked above");
-                let expiration_str = str::from_utf8(&expiration)?;
-                let seconds = expiration_str
-                    .parse()
-                    .map_err(|_| CommandError::InvalidExpiration(expiration_str.to_owned()))?;
-
-                Ok(Self::Expire(key, seconds))
-            }
+            GET_NAME => Self::parse_get(args, total),
+            SET_NAME => Self::parse_set(args, total),
+            MGET_NAME => Self::parse_mget(args, total),
+            MSET_NAME => Self::parse_mset(args, total),
+            DEL_NAME => Self::parse_del(args, total),
+            GETALL_NAME => Self::parse_getall(args, total),
+            EXPIRE_NAME => Self::parse_expire(args, total),
             other => Err(UnrecognizedCommand(other.to_owned())),
         }
     }
