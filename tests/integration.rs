@@ -206,6 +206,31 @@ fn mset_stores_keys_retrievable_with_mget() {
 }
 
 #[test]
+fn getall_returns_all_key_value_pairs() {
+    let addr = spawn_server_thread();
+    let entries = vec![
+        (b"k1".to_vec(), b"v1".to_vec()),
+        (b"k2".to_vec(), b"v2".to_vec()),
+    ];
+    assert_eq!(
+        send_request(addr, &Command::MSet(entries.clone())),
+        Response::Ok
+    );
+
+    let Response::Array(pairs) = send_request(addr, &Command::GetAll) else {
+        panic!("GETALL should return an array");
+    };
+
+    assert_eq!(pairs.len(), entries.len());
+    for (key, value) in entries {
+        assert!(pairs.contains(&Response::Array(vec![
+            Response::Cstr(key),
+            Response::Cstr(value),
+        ])));
+    }
+}
+
+#[test]
 fn mixed_commands_preserve_consistent_key_store_state() {
     let addr = spawn_server_thread();
 

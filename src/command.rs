@@ -15,7 +15,8 @@ const SET_STR: &str = "SET";
 const MGET_STR: &str = "MGET";
 const MSET_STR: &str = "MSET";
 const DEL_STR: &str = "DEL";
-const COMMAND_NAMES: [&str; 5] = [GET_STR, SET_STR, MGET_STR, MSET_STR, DEL_STR];
+const GETALL_STR: &str = "GETALL";
+const COMMAND_NAMES: [&str; 6] = [GET_STR, SET_STR, MGET_STR, MSET_STR, DEL_STR, GETALL_STR];
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -24,6 +25,7 @@ pub enum Command {
     MGet(Vec<Bytes>),
     MSet(Vec<(Bytes, Bytes)>),
     Del(Vec<Bytes>),
+    GetAll,
 }
 
 #[derive(Error, Debug)]
@@ -32,7 +34,7 @@ pub enum CommandError {
     InvalidUtf8(#[from] std::str::Utf8Error),
     #[error("unrecognized command name: {0}, expected one of: {names:?}", names = COMMAND_NAMES)]
     UnrecognizedCommand(String),
-    #[error("request must have at least 2 elements, got {0}")]
+    #[error("command has too few arguments; request had {0} elements")]
     TooFewArguments(usize),
     #[error("request had too many elements: {0}")]
     TooManyArguments(usize),
@@ -48,6 +50,7 @@ impl Command {
             Self::Get(_) => GET_STR,
             Self::MGet(_) => MGET_STR,
             Self::MSet(_) => MSET_STR,
+            Self::GetAll => GETALL_STR,
         }
     }
 
@@ -91,6 +94,17 @@ impl Command {
                     })
                     .collect(),
             ),
+            Self::GetAll => Response::Array(
+                key_store
+                    .iter()
+                    .map(|(key, value)| {
+                        Response::Array(vec![
+                            Response::Cstr(key.clone()),
+                            Response::Cstr(value.clone()),
+                        ])
+                    })
+                    .collect(),
+            ),
             Self::Del(keys) => {
                 let count = keys.iter().filter_map(|k| key_store.del(k)).count();
                 Response::Integer(count as i64)
@@ -124,6 +138,7 @@ impl Command {
                 }
             }
             Self::Del(keys) => parts.extend(keys.iter().map(Bytes::as_slice)),
+            Self::GetAll => {}
         }
 
         let mut buf = format!("*{}\r\n", parts.len()).into_bytes();
@@ -169,6 +184,7 @@ impl fmt::Display for Command {
                     write!(f, " {}", String::from_utf8_lossy(key))?;
                 }
             }
+            Self::GetAll => {}
         }
 
         Ok(())
@@ -181,21 +197,24 @@ impl TryFrom<Request> for Command {
     fn try_from(request: Request) -> Result<Self, CommandError> {
         let commands = request.into_args();
 
-        if commands.len() < 2 {
+        if commands.is_empty() {
             return Err(TooFewArguments(commands.len()));
         }
 
         let total = commands.len();
         let mut args = commands.into_iter();
-        let name_bytes = args.next().expect("len >= 2 checked above");
+        let name_bytes = args.next().expect("non-empty request checked above");
         let command_name = str::from_utf8(&name_bytes)?;
 
         match command_name {
             GET_STR => {
+                if args.len() == 0 {
+                    return Err(TooFewArguments(total));
+                }
                 if args.len() > 1 {
                     return Err(TooManyArguments(total));
                 }
-                Ok(Self::Get(args.next().expect("len >= 2 checked above")))
+                Ok(Self::Get(args.next().expect("one argument checked above")))
             }
             SET_STR => {
                 if args.len() < 2 {
@@ -210,7 +229,12 @@ impl TryFrom<Request> for Command {
                     args.next().expect("len >= 2 checked above"),
                 ))
             }
-            MGET_STR => Ok(Self::MGet(args.collect())),
+            MGET_STR => {
+                if args.len() == 0 {
+                    return Err(TooFewArguments(total));
+                }
+                Ok(Self::MGet(args.collect()))
+            }
             MSET_STR => {
                 if args.len() < 2 {
                     return Err(TooFewArguments(total));
@@ -226,7 +250,18 @@ impl TryFrom<Request> for Command {
                 }
                 Ok(Self::MSet(entries))
             }
-            DEL_STR => Ok(Self::Del(args.collect())),
+            DEL_STR => {
+                if args.len() == 0 {
+                    return Err(TooFewArguments(total));
+                }
+                Ok(Self::Del(args.collect()))
+            }
+            GETALL_STR => {
+                if args.len() != 0 {
+                    return Err(TooManyArguments(total));
+                }
+                Ok(Self::GetAll)
+            }
             other => Err(UnrecognizedCommand(other.to_owned())),
         }
     }
@@ -266,6 +301,11 @@ mod tests {
             parse(&[b"MGET", b"k1", b"k2"]).unwrap(),
             Command::MGet(vec![b"k1".to_vec(), b"k2".to_vec()]),
         );
+    }
+
+    #[test]
+    fn parses_getall_without_arguments() {
+        assert_eq!(parse(&[b"GETALL"]).unwrap(), Command::GetAll);
     }
 
     #[test]
@@ -314,6 +354,12 @@ mod tests {
     }
 
     #[test]
+    fn getall_with_arguments_errors() {
+        let err = parse(&[b"GETALL", b"extra"]).expect_err("GETALL takes no arguments");
+        assert!(matches!(err, CommandError::TooManyArguments(2)));
+    }
+
+    #[test]
     fn set_with_too_few_args_errors() {
         let err = parse(&[b"SET", b"mykey"]).expect_err("SET needs a value");
         assert!(matches!(err, CommandError::TooFewArguments(2)));
@@ -354,6 +400,11 @@ mod tests {
     #[test]
     fn round_trips_get() {
         assert_round_trips(Command::Get(b"mykey".to_vec()));
+    }
+
+    #[test]
+    fn round_trips_getall() {
+        assert_round_trips(Command::GetAll);
     }
 
     #[test]
@@ -419,5 +470,26 @@ mod tests {
                 Response::Cstr(b"v1".to_vec()),
             ])
         );
+    }
+
+    #[test]
+    fn getall_returns_nested_key_value_pairs() {
+        let mut key_store = KeyStore::default();
+        key_store.insert(b"k1".to_vec(), b"v1".to_vec());
+        key_store.insert(b"k2".to_vec(), b"v2".to_vec());
+
+        let Response::Array(pairs) = Command::GetAll.apply(&mut key_store) else {
+            panic!("GETALL should return an array");
+        };
+
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.contains(&Response::Array(vec![
+            Response::Cstr(b"k1".to_vec()),
+            Response::Cstr(b"v1".to_vec()),
+        ])));
+        assert!(pairs.contains(&Response::Array(vec![
+            Response::Cstr(b"k2".to_vec()),
+            Response::Cstr(b"v2".to_vec()),
+        ])));
     }
 }

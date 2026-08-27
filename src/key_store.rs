@@ -42,6 +42,13 @@ impl<K, V, S> KeyStore<K, V, S> {
         }
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.buckets
+            .iter()
+            .flatten()
+            .map(|entry| (&entry.key, &entry.value))
+    }
+
     fn should_resize(&self) -> bool {
         self.len as f32 / self.buckets.len() as f32 >= RESIZE_FACTOR
     }
@@ -93,7 +100,8 @@ impl<K, V, S> KeyStore<K, V, S> {
                     return None;
                 }
                 Some(e) => {
-                    if e.psl < psl { // this invariant is maintained by insertion is robin hood swap
+                    if e.psl < psl {
+                        // this invariant is maintained by insertion is robin hood swap
                         return None;
                     }
 
@@ -173,7 +181,8 @@ impl<K, V, S> KeyStore<K, V, S> {
                     if e.hash == entry.hash && e.key == entry.key {
                         return Some(std::mem::replace(&mut e.value, entry.value));
                     }
-                    if e.psl < entry.psl { // robin hood swapping, richer entries reinserted
+                    if e.psl < entry.psl {
+                        // robin hood swapping, richer entries reinserted
                         std::mem::swap(e, &mut entry);
                     }
                 }
@@ -241,6 +250,18 @@ mod tests {
 
         assert_eq!(store.get(&"key"), Some(&"value"));
         assert_eq!(store.len, 1);
+    }
+
+    #[test]
+    fn iter_returns_all_entries() {
+        let mut store = KeyStore::default();
+        store.insert("first", 1);
+        store.insert("second", 2);
+
+        let mut entries: Vec<_> = store.iter().map(|(key, value)| (*key, *value)).collect();
+        entries.sort_unstable();
+
+        assert_eq!(entries, vec![("first", 1), ("second", 2)]);
     }
 
     #[test]
