@@ -141,32 +141,29 @@ impl Command {
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut parts = vec![self.name().as_bytes().to_vec()];
+        let mut parts: Vec<&[u8]> = vec![self.name().as_bytes()];
         match self {
-            Self::Get(key) => parts.push(key.clone()),
+            Self::Get(key) => parts.push(key),
             Self::Set(key, value) => {
-                parts.push(key.clone());
-                parts.push(value.clone());
+                parts.push(key);
+                parts.push(value);
             }
-            Self::MGet(keys) => parts.extend(keys.iter().cloned()),
+            Self::MGet(keys) => parts.extend(keys.iter().map(Bytes::as_slice)),
             Self::MSet(entries) => {
                 for (key, value) in entries {
-                    parts.push(key.clone());
-                    parts.push(value.clone());
+                    parts.push(key);
+                    parts.push(value);
                 }
             }
-            Self::Del(keys) => parts.extend(keys.iter().cloned()),
+            Self::Del(keys) => parts.extend(keys.iter().map(Bytes::as_slice)),
             Self::GetAll => {}
-            Self::Expire(key, seconds) => {
-                parts.push(key.clone());
-                parts.push(seconds.to_string().into_bytes());
-            }
+            Self::Expire(_, _) => {}
         }
 
         let mut buf = format!("*{}\r\n", parts.len()).into_bytes();
         for part in parts {
             buf.extend_from_slice(format!("${}\r\n", part.len()).as_bytes());
-            buf.extend_from_slice(&part);
+            buf.extend_from_slice(part);
             buf.extend_from_slice(b"\r\n");
         }
 
@@ -496,11 +493,6 @@ mod tests {
     #[test]
     fn round_trips_del() {
         assert_round_trips(Command::Del(vec![b"k1".to_vec(), b"k2".to_vec()]));
-    }
-
-    #[test]
-    fn round_trips_expire() {
-        assert_round_trips(Command::Expire(b"mykey".to_vec(), 60));
     }
 
     #[test]

@@ -205,11 +205,11 @@ impl ResponseDecoder {
     }
 
     fn parse_response(bytes: &[u8]) -> Result<Option<Parsed<Response>>, ParseError> {
-        let Some(first) = bytes.first().copied() else {
+        let Some(first) = bytes.first() else {
             return Ok(None);
         };
 
-        match first {
+        match *first {
             SSTR_BYTE => Self::parse_sstr(bytes),
             ERROR_BYTE => Self::parse_error(bytes),
             CSTRING_BYTE => Self::parse_cstr(bytes),
