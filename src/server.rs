@@ -52,6 +52,7 @@ impl ServerState {
         });
     }
 
+    // TODO: need to handle the case where partial writes are in the AOF
     fn keystore_from_aof(
         aof: &mut AppendOnlyFile,
     ) -> Result<KeyStore<Bytes, Bytes>, KeyStoreRestoreError> {
