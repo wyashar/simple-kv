@@ -10,13 +10,22 @@ use crate::request::Request;
 use crate::response::Response;
 use crate::util::Bytes;
 
-const GET_STR: &str = "GET";
-const SET_STR: &str = "SET";
-const MGET_STR: &str = "MGET";
-const MSET_STR: &str = "MSET";
-const DEL_STR: &str = "DEL";
-const GETALL_STR: &str = "GETALL";
-const COMMAND_NAMES: [&str; 6] = [GET_STR, SET_STR, MGET_STR, MSET_STR, DEL_STR, GETALL_STR];
+const GET_NAME: &str = "GET";
+const SET_NAME: &str = "SET";
+const MGET_NAME: &str = "MGET";
+const MSET_NAME: &str = "MSET";
+const DEL_NAME: &str = "DEL";
+const GETALL_NAME: &str = "GETALL";
+const EXPIRE_NAME: &str = "EXPIRE";
+const COMMAND_NAMES: [&str; 7] = [
+    GET_NAME,
+    SET_NAME,
+    MGET_NAME,
+    MSET_NAME,
+    DEL_NAME,
+    GETALL_NAME,
+    EXPIRE_NAME,
+];
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -26,6 +35,7 @@ pub enum Command {
     MSet(Vec<(Bytes, Bytes)>),
     Del(Vec<Bytes>),
     GetAll,
+    Expire(Bytes, u64),
 }
 
 #[derive(Error, Debug)]
@@ -40,38 +50,45 @@ pub enum CommandError {
     TooManyArguments(usize),
     #[error("expected even length, got len: {0}")]
     UnevenArgumentLength(usize),
+    #[error("expiration must be a valid integer, got: {0}")]
+    InvalidExpiration(String),
 }
 
 impl Command {
     pub fn name(&self) -> &str {
         match self {
-            Self::Del(_) => DEL_STR,
-            Self::Set(_, _) => SET_STR,
-            Self::Get(_) => GET_STR,
-            Self::MGet(_) => MGET_STR,
-            Self::MSet(_) => MSET_STR,
-            Self::GetAll => GETALL_STR,
+            Self::Del(_) => DEL_NAME,
+            Self::Set(_, _) => SET_NAME,
+            Self::Get(_) => GET_NAME,
+            Self::MGet(_) => MGET_NAME,
+            Self::MSet(_) => MSET_NAME,
+            Self::GetAll => GETALL_NAME,
+            Self::Expire(_, _) => EXPIRE_NAME,
         }
     }
 
     pub fn is_set(&self) -> bool {
-        self.name() == SET_STR
+        self.name() == SET_NAME
     }
 
     pub fn is_del(&self) -> bool {
-        self.name() == DEL_STR
+        self.name() == DEL_NAME
     }
 
     pub fn is_get(&self) -> bool {
-        self.name() == GET_STR
+        self.name() == GET_NAME
     }
 
     pub fn is_mset(&self) -> bool {
-        self.name() == MSET_STR
+        self.name() == MSET_NAME
     }
 
     pub fn is_mget(&self) -> bool {
-        self.name() == MGET_STR
+        self.name() == MGET_NAME
+    }
+
+    pub fn is_expire(&self) -> bool {
+        self.name() == EXPIRE_NAME
     }
 
     pub fn is_write_op(&self) -> bool {
@@ -119,32 +136,37 @@ impl Command {
                 }
                 Response::Ok
             }
+            Self::Expire(_, _) => Response::Error("EXPIRE is not implemented yet".to_owned()),
         }
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut parts: Vec<&[u8]> = vec![self.name().as_bytes()];
+        let mut parts = vec![self.name().as_bytes().to_vec()];
         match self {
-            Self::Get(key) => parts.push(key),
+            Self::Get(key) => parts.push(key.clone()),
             Self::Set(key, value) => {
-                parts.push(key);
-                parts.push(value);
+                parts.push(key.clone());
+                parts.push(value.clone());
             }
-            Self::MGet(keys) => parts.extend(keys.iter().map(Bytes::as_slice)),
+            Self::MGet(keys) => parts.extend(keys.iter().cloned()),
             Self::MSet(entries) => {
                 for (key, value) in entries {
-                    parts.push(key);
-                    parts.push(value);
+                    parts.push(key.clone());
+                    parts.push(value.clone());
                 }
             }
-            Self::Del(keys) => parts.extend(keys.iter().map(Bytes::as_slice)),
+            Self::Del(keys) => parts.extend(keys.iter().cloned()),
             Self::GetAll => {}
+            Self::Expire(key, seconds) => {
+                parts.push(key.clone());
+                parts.push(seconds.to_string().into_bytes());
+            }
         }
 
         let mut buf = format!("*{}\r\n", parts.len()).into_bytes();
         for part in parts {
             buf.extend_from_slice(format!("${}\r\n", part.len()).as_bytes());
-            buf.extend_from_slice(part);
+            buf.extend_from_slice(&part);
             buf.extend_from_slice(b"\r\n");
         }
 
@@ -185,6 +207,9 @@ impl fmt::Display for Command {
                 }
             }
             Self::GetAll => {}
+            Self::Expire(key, seconds) => {
+                write!(f, " {} {seconds}", String::from_utf8_lossy(key))?;
+            }
         }
 
         Ok(())
@@ -207,7 +232,7 @@ impl TryFrom<Request> for Command {
         let command_name = str::from_utf8(&name_bytes)?;
 
         match command_name {
-            GET_STR => {
+            GET_NAME => {
                 if args.len() == 0 {
                     return Err(TooFewArguments(total));
                 }
@@ -216,7 +241,7 @@ impl TryFrom<Request> for Command {
                 }
                 Ok(Self::Get(args.next().expect("one argument checked above")))
             }
-            SET_STR => {
+            SET_NAME => {
                 if args.len() < 2 {
                     return Err(TooFewArguments(total));
                 }
@@ -229,13 +254,13 @@ impl TryFrom<Request> for Command {
                     args.next().expect("len >= 2 checked above"),
                 ))
             }
-            MGET_STR => {
+            MGET_NAME => {
                 if args.len() == 0 {
                     return Err(TooFewArguments(total));
                 }
                 Ok(Self::MGet(args.collect()))
             }
-            MSET_STR => {
+            MSET_NAME => {
                 if args.len() < 2 {
                     return Err(TooFewArguments(total));
                 }
@@ -250,17 +275,34 @@ impl TryFrom<Request> for Command {
                 }
                 Ok(Self::MSet(entries))
             }
-            DEL_STR => {
+            DEL_NAME => {
                 if args.len() == 0 {
                     return Err(TooFewArguments(total));
                 }
                 Ok(Self::Del(args.collect()))
             }
-            GETALL_STR => {
+            GETALL_NAME => {
                 if args.len() != 0 {
                     return Err(TooManyArguments(total));
                 }
                 Ok(Self::GetAll)
+            }
+            EXPIRE_NAME => {
+                if args.len() < 2 {
+                    return Err(TooFewArguments(total));
+                }
+                if args.len() > 2 {
+                    return Err(TooManyArguments(total));
+                }
+
+                let key = args.next().expect("len == 2 checked above");
+                let expiration = args.next().expect("len == 2 checked above");
+                let expiration_str = str::from_utf8(&expiration)?;
+                let seconds = expiration_str
+                    .parse()
+                    .map_err(|_| CommandError::InvalidExpiration(expiration_str.to_owned()))?;
+
+                Ok(Self::Expire(key, seconds))
             }
             other => Err(UnrecognizedCommand(other.to_owned())),
         }
@@ -328,6 +370,14 @@ mod tests {
     }
 
     #[test]
+    fn parses_expire() {
+        assert_eq!(
+            parse(&[b"EXPIRE", b"mykey", b"60"]).unwrap(),
+            Command::Expire(b"mykey".to_vec(), 60),
+        );
+    }
+
+    #[test]
     fn keys_and_values_need_not_be_utf8() {
         assert_eq!(
             parse(&[b"GET", b"\xff\xfe\x00"]).unwrap(),
@@ -370,6 +420,28 @@ mod tests {
         let err =
             parse(&[b"SET", b"mykey", b"myval", b"extra"]).expect_err("SET takes key + value");
         assert!(matches!(err, CommandError::TooManyArguments(4)));
+    }
+
+    #[test]
+    fn expire_validates_arguments() {
+        let err = parse(&[b"EXPIRE", b"mykey"]).expect_err("EXPIRE needs a duration");
+        assert!(matches!(err, CommandError::TooFewArguments(2)));
+
+        let err = parse(&[b"EXPIRE", b"mykey", b"60", b"extra"])
+            .expect_err("EXPIRE takes key + duration");
+        assert!(matches!(err, CommandError::TooManyArguments(4)));
+
+        let err = parse(&[b"EXPIRE", b"mykey", b"soon"]).expect_err("duration must be an integer");
+        assert!(matches!(
+            err,
+            CommandError::InvalidExpiration(value) if value == "soon"
+        ));
+
+        let err = parse(&[b"EXPIRE", b"mykey", b"-1"]).expect_err("duration must not be negative");
+        assert!(matches!(
+            err,
+            CommandError::InvalidExpiration(value) if value == "-1"
+        ));
     }
 
     #[test]
@@ -427,6 +499,11 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_expire() {
+        assert_round_trips(Command::Expire(b"mykey".to_vec(), 60));
+    }
+
+    #[test]
     fn classifies_read_and_write_commands() {
         assert!(Command::Get(b"k".to_vec()).is_get());
         assert!(!Command::Get(b"k".to_vec()).is_set());
@@ -448,6 +525,10 @@ mod tests {
         assert!(mset.is_mset());
         assert!(!mset.is_mget());
         assert!(mset.is_write_op());
+
+        let expire = Command::Expire(b"k".to_vec(), 60);
+        assert!(expire.is_expire());
+        assert!(!expire.is_write_op());
     }
 
     #[test]
