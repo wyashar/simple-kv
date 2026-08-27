@@ -75,18 +75,18 @@ impl Command {
         self.is_del() || self.is_set() || self.is_mset()
     }
 
-    pub fn apply(self, key_store: &mut KeyStore<Bytes, Bytes>) -> Response<&[u8]> {
+    pub fn apply(self, key_store: &mut KeyStore<Bytes, Bytes>) -> Response<Bytes> {
         match self {
             Self::Get(key) => key_store
                 .get(&key)
-                .map(|value| Response::Cstr(value.as_slice()))
+                .map(|value| Response::Cstr(value.clone()))
                 .unwrap_or(Response::Null),
             Self::MGet(keys) => Response::Array(
                 keys.iter()
                     .map(|key| {
                         key_store
                             .get(key)
-                            .map(|value| Response::Cstr(value.as_slice()))
+                            .map(|value| Response::Cstr(value.clone()))
                             .unwrap_or(Response::Null)
                     })
                     .collect(),
@@ -414,9 +414,9 @@ mod tests {
             Command::MGet(vec![b"k2".to_vec(), b"missing".to_vec(), b"k1".to_vec()])
                 .apply(&mut key_store),
             Response::Array(vec![
-                Response::Cstr(b"v2".as_slice()),
+                Response::Cstr(b"v2".to_vec()),
                 Response::Null,
-                Response::Cstr(b"v1".as_slice()),
+                Response::Cstr(b"v1".to_vec()),
             ])
         );
     }
