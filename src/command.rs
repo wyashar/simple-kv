@@ -228,6 +228,7 @@ impl Command {
 
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut parts: Vec<&[u8]> = vec![self.name().as_bytes()];
+        let expire_ts;
         match self {
             Self::Get(key) => parts.push(key),
             Self::Set(key, value) => {
@@ -243,7 +244,11 @@ impl Command {
             }
             Self::Del(keys) => parts.extend(keys.iter().map(Bytes::as_slice)),
             Self::GetAll => {}
-            Self::Expire(_, _) => {}
+            Self::Expire(key, expire_timestamp) => {
+                parts.push(key);
+                expire_ts = expire_timestamp.to_string();
+                parts.push(expire_ts.as_bytes());
+            }
         }
 
         let mut buf = format!("*{}\r\n", parts.len()).into_bytes();
@@ -514,6 +519,11 @@ mod tests {
     #[test]
     fn round_trips_del() {
         assert_round_trips(Command::Del(vec![b"k1".to_vec(), b"k2".to_vec()]));
+    }
+
+    #[test]
+    fn round_trips_expire() {
+        assert_round_trips(Command::Expire(b"mykey".to_vec(), 60));
     }
 
     #[test]
