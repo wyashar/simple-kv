@@ -193,6 +193,43 @@ fn expire_makes_key_unavailable() {
 }
 
 #[test]
+fn expiration_commands_return_zero_for_missing_keys() {
+    let addr = spawn_server_thread();
+
+    assert_eq!(
+        send_raw(addr, b"*3\r\n$6\r\nEXPIRE\r\n$7\r\nmissing\r\n$2\r\n60\r\n"),
+        Response::Integer(0)
+    );
+    assert_eq!(
+        send_request(addr, &Command::ExpireAt(b"missing".to_vec(), u64::MAX)),
+        Response::Integer(0)
+    );
+}
+
+#[test]
+fn set_clears_existing_expiration() {
+    let addr = spawn_server_thread();
+    let key = b"mykey".to_vec();
+    assert_eq!(
+        send_request(addr, &Command::Set(key.clone(), b"old".to_vec())),
+        Response::Ok
+    );
+    assert_eq!(
+        send_request(addr, &Command::ExpireAt(key.clone(), 0)),
+        Response::Integer(1)
+    );
+
+    assert_eq!(
+        send_request(addr, &Command::Set(key.clone(), b"new".to_vec())),
+        Response::Ok
+    );
+    assert_eq!(
+        send_request(addr, &Command::Get(key)),
+        Response::Cstr(b"new".to_vec())
+    );
+}
+
+#[test]
 fn del_returns_integer() {
     let addr = spawn_server_thread();
     assert_eq!(
@@ -470,6 +507,60 @@ fn key_store_state_survives_server_restart() {
     assert_eq!(
         send_request(restarted_server.addr, &Command::Get(key)),
         Response::Cstr(value)
+    );
+}
+
+#[test]
+fn expire_deadline_survives_server_restart() {
+    let dir = TempDir::new().expect("failed to create temporary AOF directory");
+    let aof_path = dir.path().join("expire-restart.aof");
+    let key = b"expiring-key".to_vec();
+
+    let mut first_server = ServerProcess::spawn(&aof_path);
+    assert_eq!(
+        send_request(
+            first_server.addr,
+            &Command::Set(key.clone(), b"value".to_vec())
+        ),
+        Response::Ok
+    );
+    assert_eq!(
+        send_raw(
+            first_server.addr,
+            b"*3\r\n$6\r\nEXPIRE\r\n$12\r\nexpiring-key\r\n$1\r\n1\r\n"
+        ),
+        Response::Integer(1)
+    );
+    first_server.stop();
+
+    thread::sleep(Duration::from_secs(2));
+
+    let restarted_server = ServerProcess::spawn(&aof_path);
+    assert_eq!(
+        send_request(restarted_server.addr, &Command::Get(key)),
+        Response::Null
+    );
+}
+
+#[test]
+fn server_restores_expire_at_state_from_prepopulated_aof() {
+    let dir = TempDir::new().expect("failed to create temporary AOF directory");
+    let aof_path = dir.path().join("expire-at.aof");
+    let mut contents = Command::Set(b"live".to_vec(), b"value".to_vec()).to_bytes();
+    contents.extend(Command::ExpireAt(b"live".to_vec(), u64::MAX).to_bytes());
+    contents.extend(Command::Set(b"expired".to_vec(), b"value".to_vec()).to_bytes());
+    contents.extend(Command::ExpireAt(b"expired".to_vec(), 0).to_bytes());
+    std::fs::write(&aof_path, contents).expect("failed to write AOF commands");
+
+    let server = ServerProcess::spawn(&aof_path);
+
+    assert_eq!(
+        send_request(server.addr, &Command::Get(b"live".to_vec())),
+        Response::Cstr(b"value".to_vec())
+    );
+    assert_eq!(
+        send_request(server.addr, &Command::Get(b"expired".to_vec())),
+        Response::Null
     );
 }
 
