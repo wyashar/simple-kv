@@ -10,7 +10,7 @@ use log::{info, warn};
 use thiserror::Error;
 
 use crate::append_only_file::AppendOnlyFile;
-use crate::command::{Command, CommandError};
+use crate::command::{Command, CommandError, StoredValue};
 use crate::config::Config;
 use crate::key_store::KeyStore;
 use crate::request::{RequestParseError, RequestReader};
@@ -19,7 +19,7 @@ use crate::util::Bytes;
 
 struct ServerState {
     pub aof: AppendOnlyFile,
-    pub key_store: KeyStore<Bytes, Bytes>,
+    pub key_store: KeyStore<Bytes, StoredValue>,
 }
 
 impl ServerState {
@@ -55,7 +55,7 @@ impl ServerState {
     // TODO: need to handle the case where partial writes are in the AOF
     fn keystore_from_aof(
         aof: &mut AppendOnlyFile,
-    ) -> Result<KeyStore<Bytes, Bytes>, KeyStoreRestoreError> {
+    ) -> Result<KeyStore<Bytes, StoredValue>, KeyStoreRestoreError> {
         let mut requests = RequestReader::new(aof.get_file_content_from_start()?);
         let mut key_store = KeyStore::default();
 
@@ -204,8 +204,47 @@ mod tests {
         assert_eq!(contents, expected);
         assert_eq!(
             server_state.key_store.get(&b"key".to_vec()),
-            Some(&b"value".to_vec())
+            Some(&StoredValue::new(b"value".to_vec()))
         );
+    }
+
+    #[test]
+    fn apply_command_persists_expire_as_expire_at() {
+        let dir = TempDir::new().expect("temp dir creation should work");
+        let mut server_state = ServerState::new(&dir.path().join("test.aof"));
+        server_state
+            .key_store
+            .insert(b"key".to_vec(), StoredValue::new(b"value".to_vec()));
+        let before = crate::util::get_unix_timestamp();
+        let expire = Command::try_from(crate::request::Request::from_args(vec![
+            b"EXPIRE".to_vec(),
+            b"key".to_vec(),
+            b"60".to_vec(),
+        ]))
+        .expect("EXPIRE should parse");
+
+        assert_eq!(server_state.apply_command(expire), Response::Integer(1));
+
+        let mut requests = RequestReader::new(
+            server_state
+                .aof
+                .get_file_content_from_start()
+                .expect("reader creation should work"),
+        );
+        let persisted = Command::try_from(
+            requests
+                .read_next()
+                .expect("request should be valid")
+                .expect("request should be present"),
+        )
+        .expect("command should be valid");
+
+        let Command::ExpireAt(key, timestamp) = persisted else {
+            panic!("EXPIRE should be persisted as EXPIREAT");
+        };
+        assert_eq!(key, b"key");
+        assert!(timestamp >= before + 60);
+        assert!(timestamp <= crate::util::get_unix_timestamp() + 60);
     }
 
     #[test]
@@ -214,7 +253,7 @@ mod tests {
         let mut server_state = ServerState::new(&dir.path().join("test.aof"));
         server_state
             .key_store
-            .insert(b"key".to_vec(), b"value".to_vec());
+            .insert(b"key".to_vec(), StoredValue::new(b"value".to_vec()));
 
         assert_eq!(
             server_state.apply_command(Command::Get(b"key".to_vec())),
@@ -257,8 +296,34 @@ mod tests {
 
         let key_store = ServerState::keystore_from_aof(&mut aof).expect("restore should work");
 
-        assert_eq!(key_store.get(&b"kept".to_vec()), Some(&b"new".to_vec()));
+        assert_eq!(
+            key_store.get(&b"kept".to_vec()),
+            Some(&StoredValue::new(b"new".to_vec()))
+        );
         assert!(key_store.get(&b"deleted".to_vec()).is_none());
+    }
+
+    #[test]
+    fn restores_absolute_expiration_from_aof() {
+        let dir = TempDir::new().expect("temp dir creation should work");
+        let mut aof = AppendOnlyFile::open(dir.path().join("test.aof")).expect("open should work");
+        let expires_at = crate::util::get_unix_timestamp() + 60;
+
+        for command in [
+            Command::Set(b"key".to_vec(), b"value".to_vec()),
+            Command::ExpireAt(b"key".to_vec(), expires_at),
+        ] {
+            aof.append(&command.to_bytes()).expect("append should work");
+        }
+
+        let key_store = ServerState::keystore_from_aof(&mut aof).expect("restore should work");
+
+        assert_eq!(
+            key_store
+                .get(&b"key".to_vec())
+                .and_then(|value| value.expires_at),
+            Some(expires_at)
+        );
     }
 
     #[test]
