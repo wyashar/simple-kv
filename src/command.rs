@@ -1,4 +1,5 @@
 use std::fmt;
+use std::time::SystemTime;
 
 use thiserror::Error;
 
@@ -28,6 +29,21 @@ const COMMAND_NAMES: [&str; 7] = [
 ];
 
 type CommandArgs = std::vec::IntoIter<Bytes>;
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct StoredValue {
+    pub bytes: Bytes,
+    pub expires_at: Option<SystemTime>,
+}
+
+impl StoredValue {
+    pub fn new(bytes: Bytes) -> Self {
+        Self {
+            bytes,
+            expires_at: None,
+        }
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -181,18 +197,18 @@ impl Command {
         Ok(Self::Expire(key, seconds))
     }
 
-    pub fn apply(self, key_store: &mut KeyStore<Bytes, Bytes>) -> Response<Bytes> {
+    pub(crate) fn apply(self, key_store: &mut KeyStore<Bytes, StoredValue>) -> Response<Bytes> {
         match self {
             Self::Get(key) => key_store
                 .get(&key)
-                .map(|value| Response::Cstr(value.clone()))
+                .map(|value| Response::Cstr(value.bytes.clone()))
                 .unwrap_or(Response::Null),
             Self::MGet(keys) => Response::Array(
                 keys.iter()
                     .map(|key| {
                         key_store
                             .get(key)
-                            .map(|value| Response::Cstr(value.clone()))
+                            .map(|value| Response::Cstr(value.bytes.clone()))
                             .unwrap_or(Response::Null)
                     })
                     .collect(),
@@ -203,7 +219,7 @@ impl Command {
                     .map(|(key, value)| {
                         Response::Array(vec![
                             Response::Cstr(key.clone()),
-                            Response::Cstr(value.clone()),
+                            Response::Cstr(value.bytes.clone()),
                         ])
                     })
                     .collect(),
@@ -213,12 +229,12 @@ impl Command {
                 Response::Integer(count as i64)
             }
             Self::Set(key, value) => {
-                let _ = key_store.insert(key, value);
+                let _ = key_store.insert(key, StoredValue::new(value));
                 Response::Ok
             }
             Self::MSet(entries) => {
                 for (key, value) in entries {
-                    let _ = key_store.insert(key, value);
+                    let _ = key_store.insert(key, StoredValue::new(value));
                 }
                 Response::Ok
             }
@@ -579,8 +595,8 @@ mod tests {
     #[test]
     fn getall_returns_nested_key_value_pairs() {
         let mut key_store = KeyStore::default();
-        key_store.insert(b"k1".to_vec(), b"v1".to_vec());
-        key_store.insert(b"k2".to_vec(), b"v2".to_vec());
+        key_store.insert(b"k1".to_vec(), StoredValue::new(b"v1".to_vec()));
+        key_store.insert(b"k2".to_vec(), StoredValue::new(b"v2".to_vec()));
 
         let Response::Array(pairs) = Command::GetAll.apply(&mut key_store) else {
             panic!("GETALL should return an array");

@@ -10,7 +10,7 @@ use log::{info, warn};
 use thiserror::Error;
 
 use crate::append_only_file::AppendOnlyFile;
-use crate::command::{Command, CommandError};
+use crate::command::{Command, CommandError, StoredValue};
 use crate::config::Config;
 use crate::key_store::KeyStore;
 use crate::request::{RequestParseError, RequestReader};
@@ -19,7 +19,7 @@ use crate::util::Bytes;
 
 struct ServerState {
     pub aof: AppendOnlyFile,
-    pub key_store: KeyStore<Bytes, Bytes>,
+    pub key_store: KeyStore<Bytes, StoredValue>,
 }
 
 impl ServerState {
@@ -55,7 +55,7 @@ impl ServerState {
     // TODO: need to handle the case where partial writes are in the AOF
     fn keystore_from_aof(
         aof: &mut AppendOnlyFile,
-    ) -> Result<KeyStore<Bytes, Bytes>, KeyStoreRestoreError> {
+    ) -> Result<KeyStore<Bytes, StoredValue>, KeyStoreRestoreError> {
         let mut requests = RequestReader::new(aof.get_file_content_from_start()?);
         let mut key_store = KeyStore::default();
 
@@ -204,7 +204,7 @@ mod tests {
         assert_eq!(contents, expected);
         assert_eq!(
             server_state.key_store.get(&b"key".to_vec()),
-            Some(&b"value".to_vec())
+            Some(&StoredValue::new(b"value".to_vec()))
         );
     }
 
@@ -214,7 +214,7 @@ mod tests {
         let mut server_state = ServerState::new(&dir.path().join("test.aof"));
         server_state
             .key_store
-            .insert(b"key".to_vec(), b"value".to_vec());
+            .insert(b"key".to_vec(), StoredValue::new(b"value".to_vec()));
 
         assert_eq!(
             server_state.apply_command(Command::Get(b"key".to_vec())),
@@ -257,7 +257,10 @@ mod tests {
 
         let key_store = ServerState::keystore_from_aof(&mut aof).expect("restore should work");
 
-        assert_eq!(key_store.get(&b"kept".to_vec()), Some(&b"new".to_vec()));
+        assert_eq!(
+            key_store.get(&b"kept".to_vec()),
+            Some(&StoredValue::new(b"new".to_vec()))
+        );
         assert!(key_store.get(&b"deleted".to_vec()).is_none());
     }
 
