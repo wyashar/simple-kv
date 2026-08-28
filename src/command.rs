@@ -16,7 +16,7 @@ const MGET_NAME: &str = "MGET";
 const MSET_NAME: &str = "MSET";
 const DEL_NAME: &str = "DEL";
 const GETALL_NAME: &str = "GETALL";
-// expire only exists ext
+// EXPIRE only exists externally, internally, EXPIRE is really just EXPIRE_AT (unix_now() + EXPIRE.ms)
 const EXPIRE_NAME: &str = "EXPIRE";
 const EXPIREAT_NAME: &str = "EXPIREAT";
 const COMMAND_NAMES: [&str; 8] = [
