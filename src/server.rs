@@ -209,6 +209,45 @@ mod tests {
     }
 
     #[test]
+    fn apply_command_persists_expire_as_expire_at() {
+        let dir = TempDir::new().expect("temp dir creation should work");
+        let mut server_state = ServerState::new(&dir.path().join("test.aof"));
+        server_state
+            .key_store
+            .insert(b"key".to_vec(), StoredValue::new(b"value".to_vec()));
+        let before = crate::util::get_unix_timestamp();
+        let expire = Command::try_from(crate::request::Request::from_args(vec![
+            b"EXPIRE".to_vec(),
+            b"key".to_vec(),
+            b"60".to_vec(),
+        ]))
+        .expect("EXPIRE should parse");
+
+        assert_eq!(server_state.apply_command(expire), Response::Integer(1));
+
+        let mut requests = RequestReader::new(
+            server_state
+                .aof
+                .get_file_content_from_start()
+                .expect("reader creation should work"),
+        );
+        let persisted = Command::try_from(
+            requests
+                .read_next()
+                .expect("request should be valid")
+                .expect("request should be present"),
+        )
+        .expect("command should be valid");
+
+        let Command::ExpireAt(key, timestamp) = persisted else {
+            panic!("EXPIRE should be persisted as EXPIREAT");
+        };
+        assert_eq!(key, b"key");
+        assert!(timestamp >= before + 60);
+        assert!(timestamp <= crate::util::get_unix_timestamp() + 60);
+    }
+
+    #[test]
     fn apply_command_does_not_append_reads_to_aof() {
         let dir = TempDir::new().expect("temp dir creation should work");
         let mut server_state = ServerState::new(&dir.path().join("test.aof"));
@@ -262,6 +301,29 @@ mod tests {
             Some(&StoredValue::new(b"new".to_vec()))
         );
         assert!(key_store.get(&b"deleted".to_vec()).is_none());
+    }
+
+    #[test]
+    fn restores_absolute_expiration_from_aof() {
+        let dir = TempDir::new().expect("temp dir creation should work");
+        let mut aof = AppendOnlyFile::open(dir.path().join("test.aof")).expect("open should work");
+        let expires_at = crate::util::get_unix_timestamp() + 60;
+
+        for command in [
+            Command::Set(b"key".to_vec(), b"value".to_vec()),
+            Command::ExpireAt(b"key".to_vec(), expires_at),
+        ] {
+            aof.append(&command.to_bytes()).expect("append should work");
+        }
+
+        let key_store = ServerState::keystore_from_aof(&mut aof).expect("restore should work");
+
+        assert_eq!(
+            key_store
+                .get(&b"key".to_vec())
+                .and_then(|value| value.expires_at),
+            Some(expires_at)
+        );
     }
 
     #[test]

@@ -161,6 +161,38 @@ fn set_returns_ok() {
 }
 
 #[test]
+fn expire_at_makes_expired_key_unavailable() {
+    let addr = spawn_server_thread();
+    let key = b"mykey".to_vec();
+    assert_eq!(
+        send_request(addr, &Command::Set(key.clone(), b"myval".to_vec())),
+        Response::Ok
+    );
+
+    assert_eq!(
+        send_request(addr, &Command::ExpireAt(key.clone(), 0)),
+        Response::Integer(1)
+    );
+    assert_eq!(send_request(addr, &Command::Get(key)), Response::Null);
+}
+
+#[test]
+fn expire_makes_key_unavailable() {
+    let addr = spawn_server_thread();
+    let key = b"mykey".to_vec();
+    assert_eq!(
+        send_request(addr, &Command::Set(key.clone(), b"myval".to_vec())),
+        Response::Ok
+    );
+
+    assert_eq!(
+        send_raw(addr, b"*3\r\n$6\r\nEXPIRE\r\n$5\r\nmykey\r\n$1\r\n0\r\n"),
+        Response::Integer(1)
+    );
+    assert_eq!(send_request(addr, &Command::Get(key)), Response::Null);
+}
+
+#[test]
 fn del_returns_integer() {
     let addr = spawn_server_thread();
     assert_eq!(

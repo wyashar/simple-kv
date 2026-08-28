@@ -16,8 +16,10 @@ const MGET_NAME: &str = "MGET";
 const MSET_NAME: &str = "MSET";
 const DEL_NAME: &str = "DEL";
 const GETALL_NAME: &str = "GETALL";
+// expire only exists ext
 const EXPIRE_NAME: &str = "EXPIRE";
-const COMMAND_NAMES: [&str; 7] = [
+const EXPIREAT_NAME: &str = "EXPIREAT";
+const COMMAND_NAMES: [&str; 8] = [
     GET_NAME,
     SET_NAME,
     MGET_NAME,
@@ -25,6 +27,7 @@ const COMMAND_NAMES: [&str; 7] = [
     DEL_NAME,
     GETALL_NAME,
     EXPIRE_NAME,
+    EXPIREAT_NAME,
 ];
 
 type CommandArgs = std::vec::IntoIter<Bytes>;
@@ -57,7 +60,7 @@ pub enum Command {
     MSet(Vec<(Bytes, Bytes)>),
     Del(Vec<Bytes>),
     GetAll,
-    Expire(Bytes, u64),
+    ExpireAt(Bytes, u64),
 }
 
 #[derive(Error, Debug)]
@@ -91,7 +94,7 @@ impl Command {
             Self::MGet(_) => MGET_NAME,
             Self::MSet(_) => MSET_NAME,
             Self::GetAll => GETALL_NAME,
-            Self::Expire(_, _) => EXPIRE_NAME,
+            Self::ExpireAt(_, _) => EXPIREAT_NAME,
         }
     }
 
@@ -115,12 +118,12 @@ impl Command {
         self.name() == MGET_NAME
     }
 
-    pub fn is_expire(&self) -> bool {
-        self.name() == EXPIRE_NAME
+    pub fn is_expire_at(&self) -> bool {
+        self.name() == EXPIREAT_NAME
     }
 
     pub fn is_write_op(&self) -> bool {
-        self.is_del() || self.is_set() || self.is_mset() || self.is_expire()
+        self.is_del() || self.is_set() || self.is_mset() || self.is_expire_at()
     }
 
     fn parse_get(mut args: CommandArgs, total: usize) -> Result<Self, CommandError> {
@@ -189,7 +192,7 @@ impl Command {
         Ok(Self::GetAll)
     }
 
-    fn parse_expire(mut args: CommandArgs, total: usize) -> Result<Self, CommandError> {
+    fn parse_expiration(mut args: CommandArgs, total: usize) -> Result<(Bytes, u64), CommandError> {
         if args.len() < 2 {
             return Err(TooFewArguments(total));
         }
@@ -204,7 +207,20 @@ impl Command {
             .parse()
             .map_err(|_| CommandError::InvalidExpiration(expiration_str.to_owned()))?;
 
-        Ok(Self::Expire(key, seconds))
+        Ok((key, seconds))
+    }
+
+    fn parse_expire(args: CommandArgs, total: usize) -> Result<Self, CommandError> {
+        let (key, seconds) = Self::parse_expiration(args, total)?;
+        Ok(Self::ExpireAt(
+            key,
+            get_unix_timestamp().saturating_add(seconds),
+        ))
+    }
+
+    fn parse_expire_at(args: CommandArgs, total: usize) -> Result<Self, CommandError> {
+        let (key, timestamp) = Self::parse_expiration(args, total)?;
+        Ok(Self::ExpireAt(key, timestamp))
     }
 
     pub(crate) fn apply(self, key_store: &mut KeyStore<Bytes, StoredValue>) -> Response<Bytes> {
@@ -215,7 +231,7 @@ impl Command {
             Self::Del(keys) => Self::apply_del(keys, key_store),
             Self::Set(key, value) => Self::apply_set(key, value, key_store),
             Self::MSet(entries) => Self::apply_mset(entries, key_store),
-            Self::Expire(key, seconds) => Self::apply_expire(key, seconds, key_store),
+            Self::ExpireAt(key, timestamp) => Self::apply_expire_at(key, timestamp, key_store),
         }
     }
 
@@ -294,9 +310,9 @@ impl Command {
         Response::Ok
     }
 
-    fn apply_expire(
+    fn apply_expire_at(
         key: Bytes,
-        seconds: u64,
+        timestamp: u64,
         key_store: &mut KeyStore<Bytes, StoredValue>,
     ) -> Response<Bytes> {
         Self::eject_if_expired(key_store, &key);
@@ -305,7 +321,7 @@ impl Command {
             return Response::Integer(0);
         };
 
-        value.expires_at = Some(get_unix_timestamp().saturating_add(seconds));
+        value.expires_at = Some(timestamp);
         Response::Integer(1)
     }
 
@@ -327,7 +343,7 @@ impl Command {
             }
             Self::Del(keys) => parts.extend(keys.iter().map(Bytes::as_slice)),
             Self::GetAll => {}
-            Self::Expire(key, expire_timestamp) => {
+            Self::ExpireAt(key, expire_timestamp) => {
                 parts.push(key);
                 expire_ts = expire_timestamp.to_string();
                 parts.push(expire_ts.as_bytes());
@@ -378,8 +394,8 @@ impl fmt::Display for Command {
                 }
             }
             Self::GetAll => {}
-            Self::Expire(key, seconds) => {
-                write!(f, " {} {seconds}", String::from_utf8_lossy(key))?;
+            Self::ExpireAt(key, timestamp) => {
+                write!(f, " {} {timestamp}", String::from_utf8_lossy(key))?;
             }
         }
 
@@ -410,6 +426,7 @@ impl TryFrom<Request> for Command {
             DEL_NAME => Self::parse_del(args, total),
             GETALL_NAME => Self::parse_getall(args, total),
             EXPIRE_NAME => Self::parse_expire(args, total),
+            EXPIREAT_NAME => Self::parse_expire_at(args, total),
             other => Err(UnrecognizedCommand(other.to_owned())),
         }
     }
@@ -477,9 +494,22 @@ mod tests {
 
     #[test]
     fn parses_expire() {
+        let before = get_unix_timestamp();
+        let Command::ExpireAt(key, timestamp) =
+            parse(&[b"EXPIRE", b"mykey", b"60"]).expect("EXPIRE should parse")
+        else {
+            panic!("EXPIRE should become EXPIREAT");
+        };
+        assert_eq!(key, b"mykey");
+        assert!(timestamp >= before + 60);
+        assert!(timestamp <= get_unix_timestamp() + 60);
+    }
+
+    #[test]
+    fn parses_expire_at() {
         assert_eq!(
-            parse(&[b"EXPIRE", b"mykey", b"60"]).unwrap(),
-            Command::Expire(b"mykey".to_vec(), 60),
+            parse(&[b"EXPIREAT", b"mykey", b"2000000000"]).unwrap(),
+            Command::ExpireAt(b"mykey".to_vec(), 2_000_000_000),
         );
     }
 
@@ -606,7 +636,7 @@ mod tests {
 
     #[test]
     fn round_trips_expire() {
-        assert_round_trips(Command::Expire(b"mykey".to_vec(), 60));
+        assert_round_trips(Command::ExpireAt(b"mykey".to_vec(), 2_000_000_000));
     }
 
     #[test]
@@ -632,9 +662,9 @@ mod tests {
         assert!(!mset.is_mget());
         assert!(mset.is_write_op());
 
-        let expire = Command::Expire(b"k".to_vec(), 60);
-        assert!(expire.is_expire());
-        assert!(expire.is_write_op());
+        let expire_at = Command::ExpireAt(b"k".to_vec(), 2_000_000_000);
+        assert!(expire_at.is_expire_at());
+        assert!(expire_at.is_write_op());
     }
 
     #[test]
@@ -695,11 +725,9 @@ mod tests {
         let mut key_store = KeyStore::default();
         key_store.insert(b"key".to_vec(), StoredValue::new(b"value".to_vec()));
         let before = get_unix_timestamp();
+        let command = parse(&[b"EXPIRE", b"key", b"60"]).expect("EXPIRE should parse");
 
-        assert_eq!(
-            Command::Expire(b"key".to_vec(), 60).apply(&mut key_store),
-            Response::Integer(1)
-        );
+        assert_eq!(command.apply(&mut key_store), Response::Integer(1));
 
         let expires_at = key_store
             .get(&b"key".to_vec())
@@ -710,11 +738,28 @@ mod tests {
     }
 
     #[test]
+    fn expire_at_sets_absolute_expiration() {
+        let mut key_store = KeyStore::default();
+        key_store.insert(b"key".to_vec(), StoredValue::new(b"value".to_vec()));
+
+        assert_eq!(
+            Command::ExpireAt(b"key".to_vec(), 2_000_000_000).apply(&mut key_store),
+            Response::Integer(1)
+        );
+        assert_eq!(
+            key_store
+                .get(&b"key".to_vec())
+                .and_then(|value| value.expires_at),
+            Some(2_000_000_000)
+        );
+    }
+
+    #[test]
     fn expire_returns_zero_for_missing_key() {
         let mut key_store = KeyStore::default();
 
         assert_eq!(
-            Command::Expire(b"missing".to_vec(), 60).apply(&mut key_store),
+            Command::ExpireAt(b"missing".to_vec(), get_unix_timestamp() + 60).apply(&mut key_store),
             Response::Integer(0)
         );
     }
@@ -725,7 +770,7 @@ mod tests {
         key_store.insert(b"key".to_vec(), StoredValue::new(b"value".to_vec()));
 
         assert_eq!(
-            Command::Expire(b"key".to_vec(), 0).apply(&mut key_store),
+            Command::ExpireAt(b"key".to_vec(), get_unix_timestamp()).apply(&mut key_store),
             Response::Integer(1)
         );
         assert_eq!(
