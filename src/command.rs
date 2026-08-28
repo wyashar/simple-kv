@@ -551,7 +551,7 @@ mod tests {
 
         let expire = Command::Expire(b"k".to_vec(), 60);
         assert!(expire.is_expire());
-        assert!(!expire.is_write_op());
+        assert!(expire.is_write_op());
     }
 
     #[test]

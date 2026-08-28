@@ -1,8 +1,17 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 pub type Bytes = Vec<u8>;
 
 pub const CRLF: &[u8; 2] = b"\r\n";
 pub const CSTRING_BYTE: u8 = b'$';
 pub const MAX_COMPLEX_STRING_LENGTH: usize = 512 * 1024 * 1024; // 512 MB
+
+pub fn get_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after the Unix epoch")
+        .as_secs()
+}
 
 pub struct Parsed<T> {
     pub data: T,
