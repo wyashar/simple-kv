@@ -8,7 +8,7 @@ use crate::command::CommandError::{
 use crate::key_store::KeyStore;
 use crate::request::Request;
 use crate::response::Response;
-use crate::util::{Bytes, get_unix_timestamp};
+use crate::util::{Bytes, Parsed, get_unix_timestamp};
 
 const GET_NAME: &str = "GET";
 const SET_NAME: &str = "SET";
@@ -192,7 +192,10 @@ impl Command {
         Ok(Self::GetAll)
     }
 
-    fn parse_expiration(mut args: CommandArgs, total: usize) -> Result<(Bytes, u64), CommandError> {
+    fn parse_expiration(
+        mut args: CommandArgs,
+        total: usize,
+    ) -> Result<Parsed<Bytes>, CommandError> {
         if args.len() < 2 {
             return Err(TooFewArguments(total));
         }
@@ -207,20 +210,23 @@ impl Command {
             .parse()
             .map_err(|_| CommandError::InvalidExpiration(expiration_str.to_owned()))?;
 
-        Ok((key, seconds))
+        Ok(Parsed::new(key, seconds))
     }
 
     fn parse_expire(args: CommandArgs, total: usize) -> Result<Self, CommandError> {
-        let (key, seconds) = Self::parse_expiration(args, total)?;
+        let expiration = Self::parse_expiration(args, total)?;
         Ok(Self::ExpireAt(
-            key,
-            get_unix_timestamp().saturating_add(seconds),
+            expiration.data,
+            get_unix_timestamp().saturating_add(expiration.num_bytes_parsed as u64),
         ))
     }
 
     fn parse_expire_at(args: CommandArgs, total: usize) -> Result<Self, CommandError> {
-        let (key, timestamp) = Self::parse_expiration(args, total)?;
-        Ok(Self::ExpireAt(key, timestamp))
+        let expiration = Self::parse_expiration(args, total)?;
+        Ok(Self::ExpireAt(
+            expiration.data,
+            expiration.num_bytes_parsed as u64,
+        ))
     }
 
     pub(crate) fn apply(self, key_store: &mut KeyStore<Bytes, StoredValue>) -> Response<Bytes> {
