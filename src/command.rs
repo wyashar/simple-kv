@@ -94,7 +94,7 @@ impl Command {
     }
 
     pub fn is_write_op(&self) -> bool {
-        self.is_del() || self.is_set() || self.is_mset()
+        self.is_del() || self.is_set() || self.is_mset() || self.is_expire()
     }
 
     fn parse_get(mut args: CommandArgs, total: usize) -> Result<Self, CommandError> {
