@@ -135,6 +135,24 @@ impl<K, V, S> KeyStore<K, V, S> {
         K: Eq + Hash,
         S: BuildHasher,
     {
+        let index = self.index_of(key)?;
+        self.buckets[index].as_ref().map(|entry| &entry.value)
+    }
+
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V>
+    where
+        K: Eq + Hash,
+        S: BuildHasher,
+    {
+        let index = self.index_of(key)?;
+        self.buckets[index].as_mut().map(|entry| &mut entry.value)
+    }
+
+    fn index_of(&self, key: &K) -> Option<usize>
+    where
+        K: Eq + Hash,
+        S: BuildHasher,
+    {
         let hash = self.hasher.hash_one(key);
         let mut psl: usize = 0;
         loop {
@@ -149,7 +167,7 @@ impl<K, V, S> KeyStore<K, V, S> {
                     }
 
                     if e.hash == hash && e.key == *key {
-                        return Some(&e.value);
+                        return Some(index);
                     }
                 }
             }
@@ -280,6 +298,17 @@ mod tests {
         let store = KeyStore::<&str, &str>::default();
 
         assert_eq!(store.get(&"missing"), None);
+    }
+
+    #[test]
+    fn get_mut_updates_existing_value() {
+        let mut store = KeyStore::default();
+        store.insert("key", 1);
+
+        *store.get_mut(&"key").expect("value should exist") = 2;
+
+        assert_eq!(store.get(&"key"), Some(&2));
+        assert_eq!(store.get_mut(&"missing"), None);
     }
 
     #[test]

@@ -1,5 +1,4 @@
 use std::fmt;
-use std::time::SystemTime;
 
 use thiserror::Error;
 
@@ -9,7 +8,7 @@ use crate::command::CommandError::{
 use crate::key_store::KeyStore;
 use crate::request::Request;
 use crate::response::Response;
-use crate::util::Bytes;
+use crate::util::{Bytes, get_unix_timestamp};
 
 const GET_NAME: &str = "GET";
 const SET_NAME: &str = "SET";
@@ -33,7 +32,7 @@ type CommandArgs = std::vec::IntoIter<Bytes>;
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct StoredValue {
     pub bytes: Bytes,
-    pub expires_at: Option<SystemTime>,
+    pub expires_at: Option<u64>,
 }
 
 impl StoredValue {
@@ -42,6 +41,11 @@ impl StoredValue {
             bytes,
             expires_at: None,
         }
+    }
+
+    pub fn is_expired(&self) -> bool {
+        self.expires_at
+            .is_some_and(|expires_at| expires_at <= get_unix_timestamp())
     }
 }
 
@@ -73,6 +77,12 @@ pub enum CommandError {
 }
 
 impl Command {
+    fn eject_if_expired(key_store: &mut KeyStore<Bytes, StoredValue>, key: &Bytes) {
+        if key_store.get(key).is_some_and(StoredValue::is_expired) {
+            let _ = key_store.del(key);
+        }
+    }
+
     pub fn name(&self) -> &str {
         match self {
             Self::Del(_) => DEL_NAME,
@@ -199,47 +209,104 @@ impl Command {
 
     pub(crate) fn apply(self, key_store: &mut KeyStore<Bytes, StoredValue>) -> Response<Bytes> {
         match self {
-            Self::Get(key) => key_store
-                .get(&key)
-                .map(|value| Response::Cstr(value.bytes.clone()))
-                .unwrap_or(Response::Null),
-            Self::MGet(keys) => Response::Array(
-                keys.iter()
-                    .map(|key| {
-                        key_store
-                            .get(key)
-                            .map(|value| Response::Cstr(value.bytes.clone()))
-                            .unwrap_or(Response::Null)
-                    })
-                    .collect(),
-            ),
-            Self::GetAll => Response::Array(
-                key_store
-                    .iter()
-                    .map(|(key, value)| {
-                        Response::Array(vec![
-                            Response::Cstr(key.clone()),
-                            Response::Cstr(value.bytes.clone()),
-                        ])
-                    })
-                    .collect(),
-            ),
-            Self::Del(keys) => {
-                let count = keys.iter().filter_map(|k| key_store.del(k)).count();
-                Response::Integer(count as i64)
-            }
-            Self::Set(key, value) => {
-                let _ = key_store.insert(key, StoredValue::new(value));
-                Response::Ok
-            }
-            Self::MSet(entries) => {
-                for (key, value) in entries {
-                    let _ = key_store.insert(key, StoredValue::new(value));
-                }
-                Response::Ok
-            }
-            Self::Expire(_, _) => Response::Error("EXPIRE is not implemented yet".to_owned()),
+            Self::Get(key) => Self::apply_get(key, key_store),
+            Self::MGet(keys) => Self::apply_mget(keys, key_store),
+            Self::GetAll => Self::apply_getall(key_store),
+            Self::Del(keys) => Self::apply_del(keys, key_store),
+            Self::Set(key, value) => Self::apply_set(key, value, key_store),
+            Self::MSet(entries) => Self::apply_mset(entries, key_store),
+            Self::Expire(key, seconds) => Self::apply_expire(key, seconds, key_store),
         }
+    }
+
+    fn apply_get(key: Bytes, key_store: &mut KeyStore<Bytes, StoredValue>) -> Response<Bytes> {
+        Self::eject_if_expired(key_store, &key);
+        key_store
+            .get(&key)
+            .map(|value| Response::Cstr(value.bytes.clone()))
+            .unwrap_or(Response::Null)
+    }
+
+    fn apply_mget(
+        keys: Vec<Bytes>,
+        key_store: &mut KeyStore<Bytes, StoredValue>,
+    ) -> Response<Bytes> {
+        Response::Array(
+            keys.into_iter()
+                .map(|key| Self::apply_get(key, key_store))
+                .collect(),
+        )
+    }
+
+    fn apply_getall(key_store: &mut KeyStore<Bytes, StoredValue>) -> Response<Bytes> {
+        let expired_keys: Vec<_> = key_store
+            .iter()
+            .filter(|(_, value)| value.is_expired())
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in expired_keys {
+            let _ = key_store.del(&key);
+        }
+
+        Response::Array(
+            key_store
+                .iter()
+                .map(|(key, value)| {
+                    Response::Array(vec![
+                        Response::Cstr(key.clone()),
+                        Response::Cstr(value.bytes.clone()),
+                    ])
+                })
+                .collect(),
+        )
+    }
+
+    fn apply_del(
+        keys: Vec<Bytes>,
+        key_store: &mut KeyStore<Bytes, StoredValue>,
+    ) -> Response<Bytes> {
+        let count = keys
+            .iter()
+            .filter(|key| {
+                Self::eject_if_expired(key_store, key);
+                key_store.del(key).is_some()
+            })
+            .count();
+        Response::Integer(count as i64)
+    }
+
+    fn apply_set(
+        key: Bytes,
+        value: Bytes,
+        key_store: &mut KeyStore<Bytes, StoredValue>,
+    ) -> Response<Bytes> {
+        let _ = key_store.insert(key, StoredValue::new(value));
+        Response::Ok
+    }
+
+    fn apply_mset(
+        entries: Vec<(Bytes, Bytes)>,
+        key_store: &mut KeyStore<Bytes, StoredValue>,
+    ) -> Response<Bytes> {
+        for (key, value) in entries {
+            let _ = key_store.insert(key, StoredValue::new(value));
+        }
+        Response::Ok
+    }
+
+    fn apply_expire(
+        key: Bytes,
+        seconds: u64,
+        key_store: &mut KeyStore<Bytes, StoredValue>,
+    ) -> Response<Bytes> {
+        Self::eject_if_expired(key_store, &key);
+
+        let Some(value) = key_store.get_mut(&key) else {
+            return Response::Integer(0);
+        };
+
+        value.expires_at = Some(get_unix_timestamp().saturating_add(seconds));
+        Response::Integer(1)
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -589,6 +656,81 @@ mod tests {
                 Response::Null,
                 Response::Cstr(b"v1".to_vec()),
             ])
+        );
+    }
+
+    #[test]
+    fn apply_ejects_expired_entries() {
+        let mut key_store = KeyStore::default();
+        key_store.insert(
+            b"expired".to_vec(),
+            StoredValue {
+                bytes: b"old".to_vec(),
+                expires_at: Some(0),
+            },
+        );
+        key_store.insert(
+            b"untouched".to_vec(),
+            StoredValue {
+                bytes: b"old".to_vec(),
+                expires_at: Some(0),
+            },
+        );
+        key_store.insert(b"live".to_vec(), StoredValue::new(b"value".to_vec()));
+
+        assert_eq!(
+            Command::Get(b"expired".to_vec()).apply(&mut key_store),
+            Response::Null
+        );
+        assert!(key_store.get(&b"expired".to_vec()).is_none());
+        assert!(key_store.get(&b"untouched".to_vec()).is_some());
+        assert_eq!(
+            key_store.get(&b"live".to_vec()),
+            Some(&StoredValue::new(b"value".to_vec()))
+        );
+    }
+
+    #[test]
+    fn expire_sets_ttl_for_existing_key() {
+        let mut key_store = KeyStore::default();
+        key_store.insert(b"key".to_vec(), StoredValue::new(b"value".to_vec()));
+        let before = get_unix_timestamp();
+
+        assert_eq!(
+            Command::Expire(b"key".to_vec(), 60).apply(&mut key_store),
+            Response::Integer(1)
+        );
+
+        let expires_at = key_store
+            .get(&b"key".to_vec())
+            .and_then(|value| value.expires_at)
+            .expect("expiration should be set");
+        assert!(expires_at >= before + 60);
+        assert!(expires_at <= get_unix_timestamp() + 60);
+    }
+
+    #[test]
+    fn expire_returns_zero_for_missing_key() {
+        let mut key_store = KeyStore::default();
+
+        assert_eq!(
+            Command::Expire(b"missing".to_vec(), 60).apply(&mut key_store),
+            Response::Integer(0)
+        );
+    }
+
+    #[test]
+    fn expire_with_zero_seconds_makes_key_unavailable() {
+        let mut key_store = KeyStore::default();
+        key_store.insert(b"key".to_vec(), StoredValue::new(b"value".to_vec()));
+
+        assert_eq!(
+            Command::Expire(b"key".to_vec(), 0).apply(&mut key_store),
+            Response::Integer(1)
+        );
+        assert_eq!(
+            Command::Get(b"key".to_vec()).apply(&mut key_store),
+            Response::Null
         );
     }
 
