@@ -33,6 +33,7 @@ impl ServerProcess {
             .env("SERVER_PORT", addr.port().to_string())
             .env("FSYNC_POLICY", "ONE_MIN")
             .env("AOF_PATH", aof_path)
+            .env("TTL_CLEANUP_INTERVAL", "60")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -92,6 +93,7 @@ fn spawn_server_thread() -> SocketAddr {
         server_port: addr.port(),
         fsync_policy: FsyncPolicy::OneMin,
         aof_path: Some(aof_dir.path().join("test.aof")),
+        ttl_cleanup_interval: Duration::from_secs(60),
     };
     thread::spawn(move || {
         let _aof_dir = aof_dir;

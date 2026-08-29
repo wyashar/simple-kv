@@ -9,6 +9,7 @@ const SERVER_ADDRESS: &str = "SERVER_ADDRESS";
 const SERVER_PORT: &str = "SERVER_PORT";
 const FSYNC_POLICY: &str = "FSYNC_POLICY";
 const AOF_PATH: &str = "AOF_PATH";
+const TTL_CLEANUP_INTERVAL: &str = "TTL_CLEANUP_INTERVAL";
 const FSYNC_POLICY_NAMES: [&str; 4] = ["ONE_MIN", "TWO_MIN", "THREE_MIN", "FIVE_MIN"];
 
 pub struct Config {
@@ -16,6 +17,7 @@ pub struct Config {
     pub server_port: u16,
     pub fsync_policy: FsyncPolicy,
     pub aof_path: Option<PathBuf>,
+    pub ttl_cleanup_interval: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,12 +75,19 @@ impl Config {
             .parse()
             .unwrap_or_else(|_| panic!("{FSYNC_POLICY} must be one of {FSYNC_POLICY_NAMES:?}"));
         let aof_path = env::var(AOF_PATH).ok().map(PathBuf::from);
+        let ttl_cleanup_interval = Duration::from_secs(
+            env::var(TTL_CLEANUP_INTERVAL)
+                .unwrap_or_else(|_| panic!("{TTL_CLEANUP_INTERVAL} must be set"))
+                .parse()
+                .unwrap_or_else(|_| panic!("{TTL_CLEANUP_INTERVAL} must be a valid u64")),
+        );
 
         Config {
             server_address,
             server_port,
             fsync_policy,
             aof_path,
+            ttl_cleanup_interval,
         }
     }
 }
