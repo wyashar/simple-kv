@@ -89,7 +89,7 @@ impl<R: BufRead> RequestReader<R> {
                     return Ok(None);
                 }
 
-                self.decoder.buffer.extend_from_slice(bytes);
+                self.decoder.feed(bytes);
                 bytes.len()
             };
 
@@ -99,6 +99,10 @@ impl<R: BufRead> RequestReader<R> {
 }
 
 impl RequestDecoder {
+    fn feed(&mut self, bytes: &[u8]) {
+        self.buffer.extend_from_slice(bytes);
+    }
+
     fn validate_eof(&self) -> Result<(), RequestParseError> {
         if self.poisoned {
             return Err(Poisoned);
