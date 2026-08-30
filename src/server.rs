@@ -1,5 +1,6 @@
 use std::io::{BufReader, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
+use tokio::net::TcpListener;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -89,14 +90,14 @@ enum KeyStoreRestoreError {
     Command(#[from] CommandError),
 }
 
-pub fn run(config: Config) {
+pub async fn run(config: Config) {
     let addr = format!("{}:{}", config.server_address, config.server_port);
-    let listener = TcpListener::bind(addr).expect("failed to bind to address");
+    let listener = TcpListener::bind(addr).await.expect("should be able to bind to address");
     serve(listener, config);
 }
 
-pub fn serve(listener: TcpListener, config: Config) {
-    let addr = listener.local_addr().expect("failed to read bound address");
+pub async fn serve(listener: TcpListener, config: Config) {
+    let addr = listener.local_addr().expect("should be able to read local address");
     let aof_path = config
         .aof_path
         .as_deref()
@@ -112,18 +113,12 @@ pub fn serve(listener: TcpListener, config: Config) {
     server_state.spawn_sync_thread(config.fsync_policy.duration());
     let server_state = Arc::new(Mutex::new(server_state));
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => match stream.peer_addr() {
-                Ok(peer) => {
-                    info!("accepted connection from {peer}");
-                    handle_client_connection(stream, peer, Arc::clone(&server_state));
-                }
-                Err(_) => info!("accepted connection from unknown peer"),
-            },
-            Err(e) => {
-                info!("failed to accept connection: {e}");
-            }
+    loop {
+        if let Ok((stream, addr)) = listener.accept().await {
+            info!("Client {addr} connected");
+        } else {
+            warn!("Unable to accept connection");
+            return;
         }
     }
 }
