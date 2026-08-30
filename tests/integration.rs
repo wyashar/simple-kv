@@ -86,6 +86,9 @@ fn spawn_server_thread() -> SocketAddr {
 
     let listener = TcpListener::bind(TEST_SERVER_ADDR).expect("failed to bind test server");
     let addr = listener.local_addr().expect("failed to read bound address");
+    listener
+        .set_nonblocking(true)
+        .expect("failed to make test listener nonblocking");
     let aof_dir = TempDir::new().expect("failed to create temporary AOF directory");
     let config = Config {
         server_address: addr.ip().to_string(),
@@ -95,7 +98,12 @@ fn spawn_server_thread() -> SocketAddr {
     };
     thread::spawn(move || {
         let _aof_dir = aof_dir;
-        server::serve(listener, config);
+        let runtime = tokio::runtime::Runtime::new().expect("failed to create Tokio runtime");
+        runtime.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener)
+                .expect("failed to create Tokio test listener");
+            server::serve(listener, config).await;
+        });
     });
     info!("test server running on {addr}");
     addr

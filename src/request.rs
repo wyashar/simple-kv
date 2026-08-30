@@ -3,6 +3,7 @@ use std::fmt;
 use log::debug;
 use std::io::BufRead;
 use thiserror::Error;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
 use crate::request::RequestParseError::{
     ArrayTooLong, CStringTooLong, ExpectedArray, ExpectedCString, MissingCrlf, MissingFirstByte,
@@ -66,12 +67,31 @@ impl<R> RequestReader<R> {
         }
     }
 
-    pub fn get_reader_mut(&mut self) -> &mut R {
-        &mut self.reader
-    }
-
     pub fn into_inner(self) -> R {
         self.reader
+    }
+}
+
+impl<R: AsyncBufRead + Unpin> RequestReader<R> {
+    pub async fn read_next_async(&mut self) -> Result<Option<Request>, RequestParseError> {
+        loop {
+            if let Some(request) = self.decoder.decode_next()? {
+                return Ok(Some(request));
+            }
+
+            let num_bytes_read = {
+                let bytes = self.reader.fill_buf().await?;
+                if bytes.is_empty() {
+                    self.decoder.validate_eof()?;
+                    return Ok(None);
+                }
+
+                self.decoder.buffer.extend_from_slice(bytes);
+                bytes.len()
+            };
+
+            self.reader.consume(num_bytes_read);
+        }
     }
 }
 
@@ -89,7 +109,7 @@ impl<R: BufRead> RequestReader<R> {
                     return Ok(None);
                 }
 
-                self.decoder.feed(bytes);
+                self.decoder.buffer.extend_from_slice(bytes);
                 bytes.len()
             };
 
@@ -99,10 +119,6 @@ impl<R: BufRead> RequestReader<R> {
 }
 
 impl RequestDecoder {
-    fn feed(&mut self, bytes: &[u8]) {
-        self.buffer.extend_from_slice(bytes);
-    }
-
     fn validate_eof(&self) -> Result<(), RequestParseError> {
         if self.poisoned {
             return Err(Poisoned);

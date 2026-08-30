@@ -1,11 +1,12 @@
-use std::io::{BufReader, Write};
-use std::net::{SocketAddr, TcpStream};
-use tokio::net::TcpListener;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
+use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::net::tcp::OwnedWriteHalf;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
 
 use log::{info, warn};
 use thiserror::Error;
@@ -92,12 +93,16 @@ enum KeyStoreRestoreError {
 
 pub async fn run(config: Config) {
     let addr = format!("{}:{}", config.server_address, config.server_port);
-    let listener = TcpListener::bind(addr).await.expect("should be able to bind to address");
-    serve(listener, config);
+    let listener = TcpListener::bind(addr)
+        .await
+        .expect("should be able to bind to address");
+    serve(listener, config).await;
 }
 
 pub async fn serve(listener: TcpListener, config: Config) {
-    let addr = listener.local_addr().expect("should be able to read local address");
+    let addr = listener
+        .local_addr()
+        .expect("should be able to read local address");
     let aof_path = config
         .aof_path
         .as_deref()
@@ -109,66 +114,64 @@ pub async fn serve(listener: TcpListener, config: Config) {
         aof_path.display()
     );
 
-    let server_state = ServerState::new(aof_path);
-    server_state.spawn_sync_thread(config.fsync_policy.duration());
-    let server_state = Arc::new(Mutex::new(server_state));
+    let server_state = Arc::new(Mutex::new(ServerState::new(aof_path)));
 
     loop {
         if let Ok((stream, addr)) = listener.accept().await {
             info!("Client {addr} connected");
+            tokio::spawn(handle_client_connection(
+                stream,
+                addr,
+                Arc::clone(&server_state),
+            ));
         } else {
-            warn!("Unable to accept connection");
+            warn!("Unable to accept client connection");
             return;
         }
     }
 }
 
-// TODO: handle case where another thread has posioned the lock
-fn handle_client_connection(stream: TcpStream, peer: SocketAddr, ss: Arc<Mutex<ServerState>>) {
-    thread::spawn(move || {
-        let mut requests = RequestReader::new(BufReader::new(stream));
+async fn handle_client_connection(
+    stream: TcpStream,
+    peer: SocketAddr,
+    ss: Arc<Mutex<ServerState>>,
+) {
+    let (incoming, mut outbound) = stream.into_split();
+    let mut request_reader = RequestReader::new(BufReader::new(incoming));
 
-        loop {
-            let request = match requests.read_next() {
-                Ok(Some(request)) => request,
-                Ok(None) => {
-                    info!("{peer} disconnected");
-                    return;
-                }
-                Err(e) => {
-                    warn!("failed to read request from {peer}: {e}");
-                    send_response(
-                        requests.get_reader_mut().get_mut(),
-                        Response::Error(e.to_string()),
-                    );
-                    return;
-                }
-            };
+    loop {
+        let request = match request_reader.read_next_async().await {
+            Ok(Some(request)) => request,
+            Ok(None) => {
+                info!("Client disconnected");
+                return;
+            }
+            Err(e) => {
+                warn!("Client {peer}: invalid RESP bytes: {e}");
+                send_response(&mut outbound, Response::Error(e.to_string())).await;
+                return;
+            }
+        };
 
-            match Command::try_from(request) {
-                Ok(command) => {
-                    info!("received command from {peer}: {command}");
-                    let response = {
-                        let mut server_state =
-                            ss.lock().expect("should be able to lock server state");
-                        server_state.apply_command(command)
-                    };
-                    send_response(requests.get_reader_mut().get_mut(), response);
-                }
-                Err(e) => {
-                    warn!("invalid command from {peer}: {e}");
-                    send_response(
-                        requests.get_reader_mut().get_mut(),
-                        Response::Error(e.to_string()),
-                    );
-                }
+        match Command::try_from(request) {
+            Ok(command) => {
+                info!("Received command from {peer}: {command}");
+                let response = {
+                    let mut ss = ss.lock().await;
+                    ss.apply_command(command)
+                };
+                send_response(&mut outbound, response).await;
+            }
+            Err(e) => {
+                warn!("Invalid command from {peer}: {e}");
+                send_response(&mut outbound, Response::Error(e.to_string())).await;
             }
         }
-    });
+    }
 }
 
-fn send_response(stream: &mut TcpStream, response: Response<Bytes>) {
-    match stream.write_all(&response.to_bytes()) {
+async fn send_response(outbound: &mut OwnedWriteHalf, response: Response<Bytes>) {
+    match outbound.write_all(&response.to_bytes()).await {
         Ok(()) => info!("sent response: {response}"),
         Err(e) => warn!("failed to send response: {e}"),
     }
