@@ -155,9 +155,8 @@ fn spawn_ttl_cleanup_task(ss: Arc<RwLock<ServerState>>, cleanup_interval: Durati
                 let mut ss = ss.write().await;
                 ss.remove_expired()
             };
-            if removed > 0 {
-                info!("removed {removed} expired keys");
-            }
+
+            info!("removed {removed} expired keys");
         }
     });
 }

@@ -95,7 +95,7 @@ fn spawn_server_thread() -> SocketAddr {
         server_address: addr.ip().to_string(),
         server_port: addr.port(),
         sync_interval: Duration::from_secs(60),
-        ttl_cleanup_interval: Duration::from_secs(1),
+        ttl_cleanup_interval: Duration::from_secs(30),
         wal_path: Some(aof_dir.path().join("test.aof")),
     };
     thread::spawn(move || {
