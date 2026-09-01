@@ -32,6 +32,7 @@ impl ServerProcess {
             .env("SERVER_ADDRESS", addr.ip().to_string())
             .env("SERVER_PORT", addr.port().to_string())
             .env("SYNC_INTERVAL", "60")
+            .env("TTL_CLEANUP_INTERVAL", "30")
             .env("WAL_PATH", aof_path)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -94,6 +95,7 @@ fn spawn_server_thread() -> SocketAddr {
         server_address: addr.ip().to_string(),
         server_port: addr.port(),
         sync_interval: Duration::from_secs(60),
+        ttl_cleanup_interval: Duration::from_secs(1),
         wal_path: Some(aof_dir.path().join("test.aof")),
     };
     thread::spawn(move || {
@@ -198,6 +200,47 @@ fn expire_makes_key_unavailable() {
         Response::Integer(1)
     );
     assert_eq!(send_request(addr, &Command::Get(key)), Response::Null);
+}
+
+#[test]
+fn background_ttl_cleanup_removes_expired_keys() {
+    let addr = spawn_server_thread();
+    let expired = b"expired".to_vec();
+    let live = b"live".to_vec();
+
+    assert_eq!(
+        send_request(addr, &Command::Set(expired.clone(), b"old".to_vec())),
+        Response::Ok
+    );
+    assert_eq!(
+        send_request(addr, &Command::Set(live.clone(), b"value".to_vec())),
+        Response::Ok
+    );
+    assert_eq!(
+        send_raw(addr, b"*3\r\n$6\r\nEXPIRE\r\n$7\r\nexpired\r\n$1\r\n1\r\n"),
+        Response::Integer(1)
+    );
+    assert_eq!(
+        send_request(addr, &Command::Get(expired.clone())),
+        Response::Cstr(b"old".to_vec())
+    );
+
+    thread::sleep(Duration::from_secs(2));
+
+    assert_eq!(send_request(addr, &Command::Get(expired)), Response::Null);
+    assert_eq!(
+        send_request(addr, &Command::Get(live.clone())),
+        Response::Cstr(b"value".to_vec())
+    );
+
+    let Response::Array(pairs) = send_request(addr, &Command::GetAll) else {
+        panic!("GETALL should return an array");
+    };
+    assert_eq!(pairs.len(), 1);
+    assert!(pairs.contains(&Response::Array(vec![
+        Response::Cstr(live),
+        Response::Cstr(b"value".to_vec()),
+    ])));
 }
 
 #[test]

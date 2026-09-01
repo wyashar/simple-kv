@@ -35,21 +35,6 @@ impl ServerState {
         Self { wal, key_store }
     }
 
-    fn spawn_sync_thread(&self, sync_interval: Duration) {
-        let file_handle = self
-            .wal
-            .try_clone()
-            .expect("should be able to clone append-only file");
-
-        thread::spawn(move || {
-            loop {
-                thread::sleep(sync_interval);
-                file_handle.sync();
-                info!("synced AOF");
-            }
-        });
-    }
-
     fn restore_keystore(
         wal: &mut AppendOnlyFile,
     ) -> Result<KeyStore<Bytes, StoredValue>, KeyStoreRestoreError> {
@@ -75,6 +60,22 @@ impl ServerState {
 
     fn read(&self, command: Command) -> Response<Bytes> {
         command.apply_read(&self.key_store)
+    }
+
+    fn remove_expired(&mut self) -> usize {
+        let expired_keys: Vec<_> = self
+            .key_store
+            .iter()
+            .filter(|(_, value)| value.is_expired())
+            .map(|(key, _)| key.clone())
+            .collect();
+        let removed = expired_keys.len();
+
+        for key in expired_keys {
+            let _ = self.key_store.del(&key);
+        }
+
+        removed
     }
 }
 
@@ -112,8 +113,9 @@ pub async fn serve(listener: TcpListener, config: Config) {
     );
 
     let server_state = ServerState::from_wal(wal_path);
-    server_state.spawn_sync_thread(config.sync_interval);
+    spawn_sync_thread(&server_state.wal, config.sync_interval);
     let server_state = Arc::new(RwLock::new(server_state));
+    spawn_ttl_cleanup_task(Arc::clone(&server_state), config.ttl_cleanup_interval);
 
     loop {
         if let Ok((stream, addr)) = listener.accept().await {
@@ -128,6 +130,36 @@ pub async fn serve(listener: TcpListener, config: Config) {
             return;
         }
     }
+}
+
+fn spawn_sync_thread(wal: &AppendOnlyFile, sync_interval: Duration) {
+    let file_handle = wal
+        .try_clone()
+        .expect("should be able to clone append-only file");
+
+    thread::spawn(move || {
+        loop {
+            thread::sleep(sync_interval);
+            file_handle.sync();
+            info!("synced AOF");
+        }
+    });
+}
+
+fn spawn_ttl_cleanup_task(ss: Arc<RwLock<ServerState>>, cleanup_interval: Duration) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(cleanup_interval).await;
+
+            let removed = {
+                let mut ss = ss.write().await;
+                ss.remove_expired()
+            };
+            if removed > 0 {
+                info!("removed {removed} expired keys");
+            }
+        }
+    });
 }
 
 async fn handle_client_connection(
@@ -268,6 +300,39 @@ mod tests {
             .read_to_end(&mut contents)
             .expect("read should work");
         assert!(contents.is_empty());
+    }
+
+    #[test]
+    fn cleanup_removes_expired_entries_only() {
+        let dir = TempDir::new().expect("temp dir creation should work");
+        let mut server_state = ServerState::from_wal(&dir.path().join("test.aof"));
+        server_state.key_store.insert(
+            b"expired".to_vec(),
+            StoredValue {
+                bytes: b"old".to_vec(),
+                expires_at: Some(0),
+            },
+        );
+        server_state.key_store.insert(
+            b"live-with-ttl".to_vec(),
+            StoredValue {
+                bytes: b"current".to_vec(),
+                expires_at: Some(u64::MAX),
+            },
+        );
+        server_state
+            .key_store
+            .insert(b"live".to_vec(), StoredValue::new(b"value".to_vec()));
+
+        assert_eq!(server_state.remove_expired(), 1);
+        assert!(server_state.key_store.get(&b"expired".to_vec()).is_none());
+        assert!(
+            server_state
+                .key_store
+                .get(&b"live-with-ttl".to_vec())
+                .is_some()
+        );
+        assert!(server_state.key_store.get(&b"live".to_vec()).is_some());
     }
 
     #[test]
