@@ -10,7 +10,7 @@ use log::info;
 use tempfile::TempDir;
 
 use simple_kv::command::Command;
-use simple_kv::config::{Config, FsyncPolicy};
+use simple_kv::config::Config;
 use simple_kv::response::{Response, ResponseReader};
 use simple_kv::server;
 
@@ -31,8 +31,8 @@ impl ServerProcess {
         let child = ProcessCommand::new(env!("CARGO_BIN_EXE_simple-kv"))
             .env("SERVER_ADDRESS", addr.ip().to_string())
             .env("SERVER_PORT", addr.port().to_string())
-            .env("FSYNC_POLICY", "ONE_MIN")
-            .env("AOF_PATH", aof_path)
+            .env("SYNC_INTERVAL", "60")
+            .env("WAL_PATH", aof_path)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -86,16 +86,24 @@ fn spawn_server_thread() -> SocketAddr {
 
     let listener = TcpListener::bind(TEST_SERVER_ADDR).expect("failed to bind test server");
     let addr = listener.local_addr().expect("failed to read bound address");
+    listener
+        .set_nonblocking(true)
+        .expect("failed to make test listener nonblocking");
     let aof_dir = TempDir::new().expect("failed to create temporary AOF directory");
     let config = Config {
         server_address: addr.ip().to_string(),
         server_port: addr.port(),
-        fsync_policy: FsyncPolicy::OneMin,
-        aof_path: Some(aof_dir.path().join("test.aof")),
+        sync_interval: Duration::from_secs(60),
+        wal_path: Some(aof_dir.path().join("test.aof")),
     };
     thread::spawn(move || {
         let _aof_dir = aof_dir;
-        server::serve(listener, config);
+        let runtime = tokio::runtime::Runtime::new().expect("failed to create Tokio runtime");
+        runtime.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener)
+                .expect("failed to create Tokio test listener");
+            server::serve(listener, config).await;
+        });
     });
     info!("test server running on {addr}");
     addr
