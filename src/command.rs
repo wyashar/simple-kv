@@ -229,30 +229,41 @@ impl Command {
         ))
     }
 
-    pub(crate) fn apply(self, key_store: &mut KeyStore<Bytes, StoredValue>) -> Response<Bytes> {
+    pub(crate) fn apply_read(self, key_store: &KeyStore<Bytes, StoredValue>) -> Response<Bytes> {
         match self {
             Self::Get(key) => Self::apply_get(key, key_store),
             Self::MGet(keys) => Self::apply_mget(keys, key_store),
             Self::GetAll => Self::apply_getall(key_store),
+            Self::Del(_) | Self::Set(_, _) | Self::MSet(_) | Self::ExpireAt(_, _) => {
+                unreachable!("write command passed to apply_read")
+            }
+        }
+    }
+
+    pub(crate) fn apply_write(
+        self,
+        key_store: &mut KeyStore<Bytes, StoredValue>,
+    ) -> Response<Bytes> {
+        match self {
             Self::Del(keys) => Self::apply_del(keys, key_store),
             Self::Set(key, value) => Self::apply_set(key, value, key_store),
             Self::MSet(entries) => Self::apply_mset(entries, key_store),
             Self::ExpireAt(key, timestamp) => Self::apply_expire_at(key, timestamp, key_store),
+            Self::Get(_) | Self::MGet(_) | Self::GetAll => {
+                unreachable!("read command passed to apply_write")
+            }
         }
     }
 
-    fn apply_get(key: Bytes, key_store: &mut KeyStore<Bytes, StoredValue>) -> Response<Bytes> {
-        Self::eject_if_expired(key_store, &key);
+    fn apply_get(key: Bytes, key_store: &KeyStore<Bytes, StoredValue>) -> Response<Bytes> {
         key_store
             .get(&key)
+            .filter(|value| !value.is_expired())
             .map(|value| Response::Cstr(value.bytes.clone()))
             .unwrap_or(Response::Null)
     }
 
-    fn apply_mget(
-        keys: Vec<Bytes>,
-        key_store: &mut KeyStore<Bytes, StoredValue>,
-    ) -> Response<Bytes> {
+    fn apply_mget(keys: Vec<Bytes>, key_store: &KeyStore<Bytes, StoredValue>) -> Response<Bytes> {
         Response::Array(
             keys.into_iter()
                 .map(|key| Self::apply_get(key, key_store))
@@ -260,19 +271,11 @@ impl Command {
         )
     }
 
-    fn apply_getall(key_store: &mut KeyStore<Bytes, StoredValue>) -> Response<Bytes> {
-        let expired_keys: Vec<_> = key_store
-            .iter()
-            .filter(|(_, value)| value.is_expired())
-            .map(|(key, _)| key.clone())
-            .collect();
-        for key in expired_keys {
-            let _ = key_store.del(&key);
-        }
-
+    fn apply_getall(key_store: &KeyStore<Bytes, StoredValue>) -> Response<Bytes> {
         Response::Array(
             key_store
                 .iter()
+                .filter(|(_, value)| !value.is_expired())
                 .map(|(key, value)| {
                     Response::Array(vec![
                         Response::Cstr(key.clone()),
@@ -681,12 +684,12 @@ mod tests {
                 (b"k1".to_vec(), b"v1".to_vec()),
                 (b"k2".to_vec(), b"v2".to_vec()),
             ])
-            .apply(&mut key_store),
+            .apply_write(&mut key_store),
             Response::Ok
         );
         assert_eq!(
             Command::MGet(vec![b"k2".to_vec(), b"missing".to_vec(), b"k1".to_vec()])
-                .apply(&mut key_store),
+                .apply_read(&key_store),
             Response::Array(vec![
                 Response::Cstr(b"v2".to_vec()),
                 Response::Null,
@@ -696,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_ejects_expired_entries() {
+    fn get_hides_expired_keys_without_ejecting() {
         let mut key_store = KeyStore::default();
         key_store.insert(
             b"expired".to_vec(),
@@ -715,14 +718,44 @@ mod tests {
         key_store.insert(b"live".to_vec(), StoredValue::new(b"value".to_vec()));
 
         assert_eq!(
-            Command::Get(b"expired".to_vec()).apply(&mut key_store),
+            Command::Get(b"expired".to_vec()).apply_read(&key_store),
             Response::Null
         );
-        assert!(key_store.get(&b"expired".to_vec()).is_none());
+        assert!(
+            key_store
+                .get(&b"expired".to_vec())
+                .is_some_and(StoredValue::is_expired)
+        );
         assert!(key_store.get(&b"untouched".to_vec()).is_some());
         assert_eq!(
             key_store.get(&b"live".to_vec()),
             Some(&StoredValue::new(b"value".to_vec()))
+        );
+    }
+
+    #[test]
+    fn getall_skips_expired_keys_without_ejecting() {
+        let mut key_store = KeyStore::default();
+        key_store.insert(
+            b"expired".to_vec(),
+            StoredValue {
+                bytes: b"old".to_vec(),
+                expires_at: Some(0),
+            },
+        );
+        key_store.insert(b"live".to_vec(), StoredValue::new(b"value".to_vec()));
+
+        assert_eq!(
+            Command::GetAll.apply_read(&key_store),
+            Response::Array(vec![Response::Array(vec![
+                Response::Cstr(b"live".to_vec()),
+                Response::Cstr(b"value".to_vec()),
+            ])])
+        );
+        assert!(
+            key_store
+                .get(&b"expired".to_vec())
+                .is_some_and(StoredValue::is_expired)
         );
     }
 
@@ -733,7 +766,7 @@ mod tests {
         let before = get_unix_timestamp();
         let command = parse(&[b"EXPIRE", b"key", b"60"]).expect("EXPIRE should parse");
 
-        assert_eq!(command.apply(&mut key_store), Response::Integer(1));
+        assert_eq!(command.apply_write(&mut key_store), Response::Integer(1));
 
         let expires_at = key_store
             .get(&b"key".to_vec())
@@ -749,7 +782,7 @@ mod tests {
         key_store.insert(b"key".to_vec(), StoredValue::new(b"value".to_vec()));
 
         assert_eq!(
-            Command::ExpireAt(b"key".to_vec(), 2_000_000_000).apply(&mut key_store),
+            Command::ExpireAt(b"key".to_vec(), 2_000_000_000).apply_write(&mut key_store),
             Response::Integer(1)
         );
         assert_eq!(
@@ -765,7 +798,8 @@ mod tests {
         let mut key_store = KeyStore::default();
 
         assert_eq!(
-            Command::ExpireAt(b"missing".to_vec(), get_unix_timestamp() + 60).apply(&mut key_store),
+            Command::ExpireAt(b"missing".to_vec(), get_unix_timestamp() + 60)
+                .apply_write(&mut key_store),
             Response::Integer(0)
         );
     }
@@ -776,11 +810,11 @@ mod tests {
         key_store.insert(b"key".to_vec(), StoredValue::new(b"value".to_vec()));
 
         assert_eq!(
-            Command::ExpireAt(b"key".to_vec(), get_unix_timestamp()).apply(&mut key_store),
+            Command::ExpireAt(b"key".to_vec(), get_unix_timestamp()).apply_write(&mut key_store),
             Response::Integer(1)
         );
         assert_eq!(
-            Command::Get(b"key".to_vec()).apply(&mut key_store),
+            Command::Get(b"key".to_vec()).apply_read(&key_store),
             Response::Null
         );
     }
@@ -791,7 +825,7 @@ mod tests {
         key_store.insert(b"k1".to_vec(), StoredValue::new(b"v1".to_vec()));
         key_store.insert(b"k2".to_vec(), StoredValue::new(b"v2".to_vec()));
 
-        let Response::Array(pairs) = Command::GetAll.apply(&mut key_store) else {
+        let Response::Array(pairs) = Command::GetAll.apply_read(&key_store) else {
             panic!("GETALL should return an array");
         };
 

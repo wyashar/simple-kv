@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use log::{info, warn};
 use thiserror::Error;
@@ -20,64 +20,61 @@ use crate::response::Response;
 use crate::util::Bytes;
 
 struct ServerState {
-    pub aof: AppendOnlyFile,
+    pub wal: AppendOnlyFile,
     pub key_store: KeyStore<Bytes, StoredValue>,
 }
 
 impl ServerState {
-    pub const DEFAULT_AOF_PATH: &str = "simple-kv.aof";
+    pub const DEFAULT_WAL_PATH: &str = "simple-kv.wal";
 
-    fn new(aof_path: &Path) -> Self {
-        let mut aof =
-            AppendOnlyFile::open(aof_path).expect("should be able to open append-only file");
-        let key_store = Self::keystore_from_aof(&mut aof)
+    fn from_wal(path: &Path) -> Self {
+        let mut wal = AppendOnlyFile::open(path).expect("should be able to open append-only file");
+        let key_store = Self::restore_keystore(&mut wal)
             .expect("should be able to restore key store from append-only file");
 
-        Self { aof, key_store }
-    }
-
-    fn clone_aof(&self) -> AppendOnlyFile {
-        self.aof
-            .try_clone()
-            .expect("should be able to clone append-only file")
+        Self { wal, key_store }
     }
 
     fn spawn_sync_thread(&self, sync_interval: Duration) {
-        let sync_aof = self.clone_aof();
+        let file_handle = self
+            .wal
+            .try_clone()
+            .expect("should be able to clone append-only file");
 
         thread::spawn(move || {
             loop {
                 thread::sleep(sync_interval);
-                sync_aof.sync();
+                file_handle.sync();
                 info!("synced AOF");
             }
         });
     }
 
-    // TODO: need to handle the case where partial writes are in the AOF
-    fn keystore_from_aof(
-        aof: &mut AppendOnlyFile,
+    fn restore_keystore(
+        wal: &mut AppendOnlyFile,
     ) -> Result<KeyStore<Bytes, StoredValue>, KeyStoreRestoreError> {
-        let mut requests = RequestReader::new(aof.get_file_content_from_start()?);
+        let mut requests = RequestReader::new(wal.get_file_content_from_start()?);
         let mut key_store = KeyStore::default();
 
         while let Some(request) = requests.read_next()? {
             let command = Command::try_from(request)?;
-            let _ = command.apply(&mut key_store);
+            let _ = command.apply_write(&mut key_store);
         }
 
         Ok(key_store)
     }
 
-    fn apply_command(&mut self, command: Command) -> Response<Bytes> {
-        if command.is_write_op()
-            && let Err(err) = self.aof.append(&command.to_bytes())
-        {
+    fn write(&mut self, command: Command) -> Response<Bytes> {
+        if let Err(err) = self.wal.append(&command.to_bytes()) {
             warn!("failed to append command to AOF: {err}");
             return Response::Error(err.to_string());
         }
 
-        command.apply(&mut self.key_store)
+        command.apply_write(&mut self.key_store)
+    }
+
+    fn read(&self, command: Command) -> Response<Bytes> {
+        command.apply_read(&self.key_store)
     }
 }
 
@@ -103,18 +100,20 @@ pub async fn serve(listener: TcpListener, config: Config) {
     let addr = listener
         .local_addr()
         .expect("should be able to read local address");
-    let aof_path = config
-        .aof_path
+    let wal_path = config
+        .wal_path
         .as_deref()
-        .unwrap_or_else(|| Path::new(ServerState::DEFAULT_AOF_PATH));
+        .unwrap_or_else(|| Path::new(ServerState::DEFAULT_WAL_PATH));
 
     info!(
-        "Server started on {addr}. FSYNC Policy is {:?}. AOF is at {}",
-        config.fsync_policy,
-        aof_path.display()
+        "Server started on {addr}. Sync interval is {:?}. WAL is at {}",
+        config.sync_interval,
+        wal_path.display()
     );
 
-    let server_state = Arc::new(Mutex::new(ServerState::new(aof_path)));
+    let server_state = ServerState::from_wal(wal_path);
+    server_state.spawn_sync_thread(config.sync_interval);
+    let server_state = Arc::new(RwLock::new(server_state));
 
     loop {
         if let Ok((stream, addr)) = listener.accept().await {
@@ -134,7 +133,7 @@ pub async fn serve(listener: TcpListener, config: Config) {
 async fn handle_client_connection(
     stream: TcpStream,
     peer: SocketAddr,
-    ss: Arc<Mutex<ServerState>>,
+    ss: Arc<RwLock<ServerState>>,
 ) {
     let (incoming, mut outbound) = stream.into_split();
     let mut request_reader = RequestReader::new(BufReader::new(incoming));
@@ -156,9 +155,12 @@ async fn handle_client_connection(
         match Command::try_from(request) {
             Ok(command) => {
                 info!("Received command from {peer}: {command}");
-                let response = {
-                    let mut ss = ss.lock().await;
-                    ss.apply_command(command)
+                let response = if command.is_write_op() {
+                    let mut ss = ss.write().await;
+                    ss.write(command)
+                } else {
+                    let ss = ss.read().await;
+                    ss.read(command)
                 };
                 send_response(&mut outbound, response).await;
             }
@@ -186,15 +188,15 @@ mod tests {
     #[test]
     fn apply_command_appends_writes_to_aof() {
         let dir = TempDir::new().expect("temp dir creation should work");
-        let mut server_state = ServerState::new(&dir.path().join("test.aof"));
+        let mut server_state = ServerState::from_wal(&dir.path().join("test.aof"));
         let command = Command::Set(b"key".to_vec(), b"value".to_vec());
         let expected = command.to_bytes();
 
-        assert_eq!(server_state.apply_command(command), Response::Ok);
+        assert_eq!(server_state.write(command), Response::Ok);
 
         let mut contents = Vec::new();
         server_state
-            .aof
+            .wal
             .get_file_content_from_start()
             .expect("reader creation should work")
             .read_to_end(&mut contents)
@@ -209,7 +211,7 @@ mod tests {
     #[test]
     fn apply_command_persists_expire_as_expire_at() {
         let dir = TempDir::new().expect("temp dir creation should work");
-        let mut server_state = ServerState::new(&dir.path().join("test.aof"));
+        let mut server_state = ServerState::from_wal(&dir.path().join("test.aof"));
         server_state
             .key_store
             .insert(b"key".to_vec(), StoredValue::new(b"value".to_vec()));
@@ -221,11 +223,11 @@ mod tests {
         ]))
         .expect("EXPIRE should parse");
 
-        assert_eq!(server_state.apply_command(expire), Response::Integer(1));
+        assert_eq!(server_state.write(expire), Response::Integer(1));
 
         let mut requests = RequestReader::new(
             server_state
-                .aof
+                .wal
                 .get_file_content_from_start()
                 .expect("reader creation should work"),
         );
@@ -248,19 +250,19 @@ mod tests {
     #[test]
     fn apply_command_does_not_append_reads_to_aof() {
         let dir = TempDir::new().expect("temp dir creation should work");
-        let mut server_state = ServerState::new(&dir.path().join("test.aof"));
+        let mut server_state = ServerState::from_wal(&dir.path().join("test.aof"));
         server_state
             .key_store
             .insert(b"key".to_vec(), StoredValue::new(b"value".to_vec()));
 
         assert_eq!(
-            server_state.apply_command(Command::Get(b"key".to_vec())),
+            server_state.read(Command::Get(b"key".to_vec())),
             Response::Cstr(b"value".to_vec())
         );
 
         let mut contents = Vec::new();
         server_state
-            .aof
+            .wal
             .get_file_content_from_start()
             .expect("reader creation should work")
             .read_to_end(&mut contents)
@@ -273,7 +275,7 @@ mod tests {
         let dir = TempDir::new().expect("temp dir creation should work");
         let mut aof = AppendOnlyFile::open(dir.path().join("test.aof")).expect("open should work");
 
-        let key_store = ServerState::keystore_from_aof(&mut aof).expect("restore should work");
+        let key_store = ServerState::restore_keystore(&mut aof).expect("restore should work");
 
         assert!(key_store.get(&b"missing".to_vec()).is_none());
     }
@@ -292,7 +294,7 @@ mod tests {
             aof.append(&command.to_bytes()).expect("append should work");
         }
 
-        let key_store = ServerState::keystore_from_aof(&mut aof).expect("restore should work");
+        let key_store = ServerState::restore_keystore(&mut aof).expect("restore should work");
 
         assert_eq!(
             key_store.get(&b"kept".to_vec()),
@@ -314,7 +316,7 @@ mod tests {
             aof.append(&command.to_bytes()).expect("append should work");
         }
 
-        let key_store = ServerState::keystore_from_aof(&mut aof).expect("restore should work");
+        let key_store = ServerState::restore_keystore(&mut aof).expect("restore should work");
 
         assert_eq!(
             key_store
@@ -331,7 +333,7 @@ mod tests {
         aof.append(b"*3\r\n$3\r\nSET\r\n")
             .expect("append should work");
 
-        let err = match ServerState::keystore_from_aof(&mut aof) {
+        let err = match ServerState::restore_keystore(&mut aof) {
             Ok(_) => panic!("truncated request should fail"),
             Err(err) => err,
         };
@@ -349,7 +351,7 @@ mod tests {
         aof.append(b"*2\r\n$3\r\nFOO\r\n$3\r\nkey\r\n")
             .expect("append should work");
 
-        let err = match ServerState::keystore_from_aof(&mut aof) {
+        let err = match ServerState::restore_keystore(&mut aof) {
             Ok(_) => panic!("invalid command should fail"),
             Err(err) => err,
         };
