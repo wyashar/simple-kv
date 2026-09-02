@@ -258,9 +258,10 @@ fn expiration_commands_return_zero_for_missing_keys() {
 }
 
 #[test]
-fn ttl_reports_remaining_seconds_and_missing_keys() {
+fn ttl_reports_stored_unix_timestamp_and_missing_keys() {
     let addr = spawn_server_thread();
     let key = b"mykey".to_vec();
+    let expires_at = 2_000_000_000;
 
     assert_eq!(
         send_request(addr, &Command::Ttl(key.clone())),
@@ -275,14 +276,13 @@ fn ttl_reports_remaining_seconds_and_missing_keys() {
         Response::Integer(-1)
     );
     assert_eq!(
-        send_raw(addr, b"*3\r\n$6\r\nEXPIRE\r\n$5\r\nmykey\r\n$2\r\n60\r\n"),
+        send_request(addr, &Command::ExpireAt(key.clone(), expires_at)),
         Response::Integer(1)
     );
-
-    let Response::Integer(ttl) = send_request(addr, &Command::Ttl(key.clone())) else {
-        panic!("TTL should return an integer");
-    };
-    assert!((0..=60).contains(&ttl));
+    assert_eq!(
+        send_request(addr, &Command::Ttl(key.clone())),
+        Response::Integer(expires_at as i64)
+    );
 
     assert_eq!(
         send_request(addr, &Command::ExpireAt(key.clone(), 0)),

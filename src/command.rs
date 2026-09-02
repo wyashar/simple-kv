@@ -313,9 +313,7 @@ impl Command {
             None => Response::Integer(TTL_MISSING),
             Some(value) => match value.expires_at {
                 None => Response::Integer(TTL_NO_EXPIRE),
-                Some(expires_at) => {
-                    Response::Integer(expires_at.saturating_sub(get_unix_timestamp()) as i64)
-                }
+                Some(expires_at) => Response::Integer(expires_at as i64),
             },
         }
     }
@@ -868,19 +866,19 @@ mod tests {
     }
 
     #[test]
-    fn ttl_returns_remaining_seconds_for_expiring_key() {
+    fn ttl_returns_stored_unix_timestamp_for_expiring_key() {
         let mut key_store = KeyStore::default();
         key_store.insert(b"key".to_vec(), StoredValue::new(b"value".to_vec()));
-        let before = get_unix_timestamp();
-        let command = parse(&[b"EXPIRE", b"key", b"60"]).expect("EXPIRE should parse");
-        assert_eq!(command.apply_write(&mut key_store), Response::Integer(1));
+        let expires_at = 2_000_000_000;
 
-        let Response::Integer(ttl) = Command::Ttl(b"key".to_vec()).apply_read(&key_store) else {
-            panic!("TTL should return an integer");
-        };
-        assert!(ttl >= 0);
-        assert!(ttl as u64 <= 60);
-        assert!(before + ttl as u64 <= get_unix_timestamp() + 60);
+        assert_eq!(
+            Command::ExpireAt(b"key".to_vec(), expires_at).apply_write(&mut key_store),
+            Response::Integer(1)
+        );
+        assert_eq!(
+            Command::Ttl(b"key".to_vec()).apply_read(&key_store),
+            Response::Integer(expires_at as i64)
+        );
     }
 
     #[test]
