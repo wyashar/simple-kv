@@ -1,4 +1,4 @@
-use std::io::{BufReader, Write};
+use std::io::Write;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Child, Command as ProcessCommand, Stdio};
@@ -139,7 +139,7 @@ fn send_raw(addr: SocketAddr, bytes: &[u8]) -> Response {
 }
 
 fn deserialize_response(stream: &mut TcpStream) -> Response {
-    ResponseReader::new(BufReader::new(stream))
+    ResponseReader::new(stream)
         .read_next()
         .expect("failed to parse server response")
         .expect("server closed the connection before sending a response")

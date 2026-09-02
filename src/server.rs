@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
@@ -167,7 +167,7 @@ async fn handle_client_connection(
     ss: Arc<RwLock<ServerState>>,
 ) {
     let (incoming, mut outbound) = stream.into_split();
-    let mut request_reader = RequestReader::new(BufReader::new(incoming));
+    let mut request_reader = RequestReader::new(incoming);
 
     loop {
         let request = match request_reader.read_next_async().await {

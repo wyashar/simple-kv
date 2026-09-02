@@ -1,8 +1,9 @@
 use std::fmt;
-use std::io::BufRead;
+use std::io::Read;
 
 use log::debug;
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::response::ParseError::{
     CStringTooLong, InvalidArrayLength, InvalidCStringLength, MissingCrlf, Poisoned, UnexpectedEof,
@@ -15,6 +16,7 @@ const ERROR_BYTE: u8 = b'-';
 const INTEGER_BYTE: u8 = b':';
 const ARRAY_BYTE: u8 = b'*';
 const NULL_CSTR_LEN: i64 = -1;
+const READ_CHUNK_SIZE: usize = 8192;
 const OK_BODY: &[u8] = b"OK";
 const PREFIX_BYTES: [u8; 5] = [
     SSTR_BYTE,
@@ -147,25 +149,44 @@ impl<R> ResponseReader<R> {
     }
 }
 
-impl<R: BufRead> ResponseReader<R> {
+impl<R: AsyncRead + Unpin> ResponseReader<R> {
+    pub async fn read_next_async(&mut self) -> Result<Option<Response>, ParseError> {
+        loop {
+            if let Some(response) = self.decoder.decode_next()? {
+                return Ok(Some(response));
+            }
+
+            let mut chunk = [0u8; READ_CHUNK_SIZE];
+            let num_bytes_read = self.reader.read(&mut chunk).await?;
+            if num_bytes_read == 0 {
+                self.decoder.validate_eof()?;
+                return Ok(None);
+            }
+
+            self.decoder
+                .buffer
+                .extend_from_slice(&chunk[..num_bytes_read]);
+        }
+    }
+}
+
+impl<R: Read> ResponseReader<R> {
     pub fn read_next(&mut self) -> Result<Option<Response>, ParseError> {
         loop {
             if let Some(response) = self.decoder.decode_next()? {
                 return Ok(Some(response));
             }
 
-            let num_bytes_read = {
-                let bytes = self.reader.fill_buf()?;
-                if bytes.is_empty() {
-                    self.decoder.validate_eof()?;
-                    return Ok(None);
-                }
+            let mut chunk = [0u8; READ_CHUNK_SIZE];
+            let num_bytes_read = self.reader.read(&mut chunk)?;
+            if num_bytes_read == 0 {
+                self.decoder.validate_eof()?;
+                return Ok(None);
+            }
 
-                self.decoder.buffer.extend_from_slice(bytes);
-                bytes.len()
-            };
-
-            self.reader.consume(num_bytes_read);
+            self.decoder
+                .buffer
+                .extend_from_slice(&chunk[..num_bytes_read]);
         }
     }
 }
