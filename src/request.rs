@@ -1,9 +1,9 @@
 use std::fmt;
+use std::io::Read;
 
 use log::debug;
-use std::io::BufRead;
 use thiserror::Error;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::request::RequestParseError::{
     ArrayTooLong, CStringTooLong, ExpectedArray, ExpectedCString, MissingCrlf, MissingFirstByte,
@@ -13,6 +13,7 @@ use crate::util::{Bytes, CRLF, CSTRING_BYTE, MAX_COMPLEX_STRING_LENGTH, Parsed, 
 
 const MAX_ARRAY_LENGTH: usize = 1024 * 1024;
 const ARRAY_BYTE: u8 = b'*';
+const READ_CHUNK_SIZE: usize = 8192;
 
 #[derive(Debug)]
 pub struct Request {
@@ -72,48 +73,44 @@ impl<R> RequestReader<R> {
     }
 }
 
-impl<R: AsyncBufRead + Unpin> RequestReader<R> {
+impl<R: AsyncRead + Unpin> RequestReader<R> {
     pub async fn read_next_async(&mut self) -> Result<Option<Request>, RequestParseError> {
         loop {
             if let Some(request) = self.decoder.decode_next()? {
                 return Ok(Some(request));
             }
 
-            let num_bytes_read = {
-                let bytes = self.reader.fill_buf().await?;
-                if bytes.is_empty() {
-                    self.decoder.validate_eof()?;
-                    return Ok(None);
-                }
+            let mut chunk = [0u8; READ_CHUNK_SIZE];
+            let num_bytes_read = self.reader.read(&mut chunk).await?;
+            if num_bytes_read == 0 {
+                self.decoder.validate_eof()?;
+                return Ok(None);
+            }
 
-                self.decoder.buffer.extend_from_slice(bytes);
-                bytes.len()
-            };
-
-            self.reader.consume(num_bytes_read);
+            self.decoder
+                .buffer
+                .extend_from_slice(&chunk[..num_bytes_read]);
         }
     }
 }
 
-impl<R: BufRead> RequestReader<R> {
+impl<R: Read> RequestReader<R> {
     pub fn read_next(&mut self) -> Result<Option<Request>, RequestParseError> {
         loop {
             if let Some(request) = self.decoder.decode_next()? {
                 return Ok(Some(request));
             }
 
-            let num_bytes_read = {
-                let bytes = self.reader.fill_buf()?;
-                if bytes.is_empty() {
-                    self.decoder.validate_eof()?;
-                    return Ok(None);
-                }
+            let mut chunk = [0u8; READ_CHUNK_SIZE];
+            let num_bytes_read = self.reader.read(&mut chunk)?;
+            if num_bytes_read == 0 {
+                self.decoder.validate_eof()?;
+                return Ok(None);
+            }
 
-                self.decoder.buffer.extend_from_slice(bytes);
-                bytes.len()
-            };
-
-            self.reader.consume(num_bytes_read);
+            self.decoder
+                .buffer
+                .extend_from_slice(&chunk[..num_bytes_read]);
         }
     }
 }

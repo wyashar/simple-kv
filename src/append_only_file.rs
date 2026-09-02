@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
 pub struct AppendOnlyFile {
@@ -21,9 +21,9 @@ impl AppendOnlyFile {
         self.file.write_all(bytes)
     }
 
-    pub fn get_file_content_from_start(&mut self) -> std::io::Result<BufReader<&File>> {
+    pub fn get_file_content_from_start(&mut self) -> std::io::Result<&File> {
         self.file.seek(SeekFrom::Start(0))?;
-        Ok(BufReader::new(&self.file))
+        Ok(&self.file)
     }
 
     pub fn try_clone(&self) -> std::io::Result<Self> {
