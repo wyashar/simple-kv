@@ -1,0 +1,7 @@
+[package]
+name = "simple-kv-http"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+simple-kv = { path = "../simple-kv" }

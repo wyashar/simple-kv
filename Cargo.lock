@@ -451,6 +451,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "simple-kv-http"
+version = "0.1.0"
+dependencies = [
+ "simple-kv",
+]
+
+[[package]]
 name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
