@@ -143,10 +143,6 @@ impl<R> ResponseReader<R> {
     pub fn get_reader_mut(&mut self) -> &mut R {
         &mut self.reader
     }
-
-    pub fn into_inner(self) -> R {
-        self.reader
-    }
 }
 
 impl<R: AsyncRead + Unpin> ResponseReader<R> {
