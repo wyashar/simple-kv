@@ -31,8 +31,8 @@ const COMMAND_NAMES: [&str; 9] = [
     EXPIREAT_NAME,
     TTL_NAME,
 ];
-const TTL_MISSING: i64 = -2;
-const TTL_NO_EXPIRE: i64 = -1;
+const TTL_KEY_MISSING_RESPONSE: i64 = -2;
+const TTL_KEY_NO_EXPIRE_RESPONSE: i64 = -1;
 
 type CommandArgs = std::vec::IntoIter<Bytes>;
 
@@ -309,13 +309,14 @@ impl Command {
     }
 
     fn apply_ttl(key: Bytes, key_store: &KeyStore<Bytes, StoredValue>) -> Response<Bytes> {
-        match key_store.get(&key).filter(|value| !value.is_expired()) {
-            None => Response::Integer(TTL_MISSING),
-            Some(value) => match value.expires_at {
-                None => Response::Integer(TTL_NO_EXPIRE),
-                Some(expires_at) => Response::Integer(expires_at as i64),
-            },
-        }
+        let Some(value) = key_store.get(&key).filter(|value| !value.is_expired()) else {
+            return Response::Integer(TTL_KEY_MISSING_RESPONSE);
+        };
+        let Some(expires_at) = value.expires_at else {
+            return Response::Integer(TTL_KEY_NO_EXPIRE_RESPONSE);
+        };
+
+        Response::Integer(expires_at as i64)
     }
 
     fn apply_del(
@@ -888,12 +889,22 @@ mod tests {
 
         assert_eq!(
             Command::Ttl(b"key".to_vec()).apply_read(&key_store),
-            Response::Integer(TTL_NO_EXPIRE)
+            Response::Integer(TTL_KEY_NO_EXPIRE_RESPONSE)
         );
     }
 
     #[test]
-    fn ttl_returns_minus_two_for_missing_or_expired_keys_without_ejecting() {
+    fn ttl_returns_minus_two_for_missing_key() {
+        let key_store = KeyStore::default();
+
+        assert_eq!(
+            Command::Ttl(b"missing".to_vec()).apply_read(&key_store),
+            Response::Integer(TTL_KEY_MISSING_RESPONSE)
+        );
+    }
+
+    #[test]
+    fn ttl_treats_expired_keys_as_missing_without_ejecting() {
         let mut key_store = KeyStore::default();
         key_store.insert(
             b"expired".to_vec(),
@@ -904,12 +915,8 @@ mod tests {
         );
 
         assert_eq!(
-            Command::Ttl(b"missing".to_vec()).apply_read(&key_store),
-            Response::Integer(TTL_MISSING)
-        );
-        assert_eq!(
             Command::Ttl(b"expired".to_vec()).apply_read(&key_store),
-            Response::Integer(TTL_MISSING)
+            Response::Integer(TTL_KEY_MISSING_RESPONSE)
         );
         assert!(
             key_store
