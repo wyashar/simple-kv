@@ -258,6 +258,43 @@ fn expiration_commands_return_zero_for_missing_keys() {
 }
 
 #[test]
+fn ttl_reports_stored_unix_timestamp_and_missing_keys() {
+    let addr = spawn_server_thread();
+    let key = b"mykey".to_vec();
+    let expires_at = 2_000_000_000;
+
+    assert_eq!(
+        send_request(addr, &Command::Ttl(key.clone())),
+        Response::Integer(-2)
+    );
+    assert_eq!(
+        send_request(addr, &Command::Set(key.clone(), b"myval".to_vec())),
+        Response::Ok
+    );
+    assert_eq!(
+        send_request(addr, &Command::Ttl(key.clone())),
+        Response::Integer(-1)
+    );
+    assert_eq!(
+        send_request(addr, &Command::ExpireAt(key.clone(), expires_at)),
+        Response::Integer(1)
+    );
+    assert_eq!(
+        send_request(addr, &Command::Ttl(key.clone())),
+        Response::Integer(expires_at as i64)
+    );
+
+    assert_eq!(
+        send_request(addr, &Command::ExpireAt(key.clone(), 0)),
+        Response::Integer(1)
+    );
+    assert_eq!(
+        send_request(addr, &Command::Ttl(key)),
+        Response::Integer(-2)
+    );
+}
+
+#[test]
 fn set_clears_existing_expiration() {
     let addr = spawn_server_thread();
     let key = b"mykey".to_vec();

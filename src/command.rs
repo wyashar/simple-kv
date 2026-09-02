@@ -19,7 +19,8 @@ const GETALL_NAME: &str = "GETALL";
 // EXPIRE only exists externally, internally, EXPIRE is really just EXPIRE_AT (unix_now() + EXPIRE.ms)
 const EXPIRE_NAME: &str = "EXPIRE";
 const EXPIREAT_NAME: &str = "EXPIREAT";
-const COMMAND_NAMES: [&str; 8] = [
+const TTL_NAME: &str = "TTL";
+const COMMAND_NAMES: [&str; 9] = [
     GET_NAME,
     SET_NAME,
     MGET_NAME,
@@ -28,7 +29,10 @@ const COMMAND_NAMES: [&str; 8] = [
     GETALL_NAME,
     EXPIRE_NAME,
     EXPIREAT_NAME,
+    TTL_NAME,
 ];
+const TTL_KEY_MISSING_RESPONSE: i64 = -2;
+const TTL_KEY_NO_EXPIRE_RESPONSE: i64 = -1;
 
 type CommandArgs = std::vec::IntoIter<Bytes>;
 
@@ -61,6 +65,7 @@ pub enum Command {
     Del(Vec<Bytes>),
     GetAll,
     ExpireAt(Bytes, u64),
+    Ttl(Bytes),
 }
 
 #[derive(Error, Debug)]
@@ -95,6 +100,7 @@ impl Command {
             Self::MSet(_) => MSET_NAME,
             Self::GetAll => GETALL_NAME,
             Self::ExpireAt(_, _) => EXPIREAT_NAME,
+            Self::Ttl(_) => TTL_NAME,
         }
     }
 
@@ -120,6 +126,10 @@ impl Command {
 
     pub fn is_expire_at(&self) -> bool {
         self.name() == EXPIREAT_NAME
+    }
+
+    pub fn is_ttl(&self) -> bool {
+        self.name() == TTL_NAME
     }
 
     pub fn is_write_op(&self) -> bool {
@@ -192,6 +202,17 @@ impl Command {
         Ok(Self::GetAll)
     }
 
+    fn parse_ttl(mut args: CommandArgs, total: usize) -> Result<Self, CommandError> {
+        if args.len() == 0 {
+            return Err(TooFewArguments(total));
+        }
+        if args.len() > 1 {
+            return Err(TooManyArguments(total));
+        }
+
+        Ok(Self::Ttl(args.next().expect("one argument checked above")))
+    }
+
     fn parse_expiration(
         mut args: CommandArgs,
         total: usize,
@@ -234,6 +255,7 @@ impl Command {
             Self::Get(key) => Self::apply_get(key, key_store),
             Self::MGet(keys) => Self::apply_mget(keys, key_store),
             Self::GetAll => Self::apply_getall(key_store),
+            Self::Ttl(key) => Self::apply_ttl(key, key_store),
             Self::Del(_) | Self::Set(_, _) | Self::MSet(_) | Self::ExpireAt(_, _) => {
                 unreachable!("write command passed to apply_read")
             }
@@ -249,7 +271,7 @@ impl Command {
             Self::Set(key, value) => Self::apply_set(key, value, key_store),
             Self::MSet(entries) => Self::apply_mset(entries, key_store),
             Self::ExpireAt(key, timestamp) => Self::apply_expire_at(key, timestamp, key_store),
-            Self::Get(_) | Self::MGet(_) | Self::GetAll => {
+            Self::Get(_) | Self::MGet(_) | Self::GetAll | Self::Ttl(_) => {
                 unreachable!("read command passed to apply_write")
             }
         }
@@ -284,6 +306,17 @@ impl Command {
                 })
                 .collect(),
         )
+    }
+
+    fn apply_ttl(key: Bytes, key_store: &KeyStore<Bytes, StoredValue>) -> Response<Bytes> {
+        let Some(value) = key_store.get(&key).filter(|value| !value.is_expired()) else {
+            return Response::Integer(TTL_KEY_MISSING_RESPONSE);
+        };
+        let Some(expires_at) = value.expires_at else {
+            return Response::Integer(TTL_KEY_NO_EXPIRE_RESPONSE);
+        };
+
+        Response::Integer(expires_at as i64)
     }
 
     fn apply_del(
@@ -352,6 +385,7 @@ impl Command {
             }
             Self::Del(keys) => parts.extend(keys.iter().map(Bytes::as_slice)),
             Self::GetAll => {}
+            Self::Ttl(key) => parts.push(key),
             Self::ExpireAt(key, expire_timestamp) => {
                 parts.push(key);
                 expire_ts = expire_timestamp.to_string();
@@ -403,6 +437,7 @@ impl fmt::Display for Command {
                 }
             }
             Self::GetAll => {}
+            Self::Ttl(key) => write!(f, " {}", String::from_utf8_lossy(key))?,
             Self::ExpireAt(key, timestamp) => {
                 write!(f, " {} {timestamp}", String::from_utf8_lossy(key))?;
             }
@@ -436,6 +471,7 @@ impl TryFrom<Request> for Command {
             GETALL_NAME => Self::parse_getall(args, total),
             EXPIRE_NAME => Self::parse_expire(args, total),
             EXPIREAT_NAME => Self::parse_expire_at(args, total),
+            TTL_NAME => Self::parse_ttl(args, total),
             other => Err(UnrecognizedCommand(other.to_owned())),
         }
     }
@@ -523,6 +559,14 @@ mod tests {
     }
 
     #[test]
+    fn parses_ttl() {
+        assert_eq!(
+            parse(&[b"TTL", b"mykey"]).unwrap(),
+            Command::Ttl(b"mykey".to_vec())
+        );
+    }
+
+    #[test]
     fn keys_and_values_need_not_be_utf8() {
         assert_eq!(
             parse(&[b"GET", b"\xff\xfe\x00"]).unwrap(),
@@ -590,6 +634,15 @@ mod tests {
     }
 
     #[test]
+    fn ttl_validates_arguments() {
+        let err = parse(&[b"TTL"]).expect_err("TTL needs a key");
+        assert!(matches!(err, CommandError::TooFewArguments(1)));
+
+        let err = parse(&[b"TTL", b"mykey", b"extra"]).expect_err("TTL takes one key");
+        assert!(matches!(err, CommandError::TooManyArguments(3)));
+    }
+
+    #[test]
     fn mset_requires_complete_key_value_pairs() {
         let err = parse(&[b"MSET", b"k1", b"v1", b"k2"])
             .expect_err("MSET requires a value for every key");
@@ -649,6 +702,11 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_ttl() {
+        assert_round_trips(Command::Ttl(b"mykey".to_vec()));
+    }
+
+    #[test]
     fn classifies_read_and_write_commands() {
         assert!(Command::Get(b"k".to_vec()).is_get());
         assert!(!Command::Get(b"k".to_vec()).is_set());
@@ -674,6 +732,10 @@ mod tests {
         let expire_at = Command::ExpireAt(b"k".to_vec(), 2_000_000_000);
         assert!(expire_at.is_expire_at());
         assert!(expire_at.is_write_op());
+
+        let ttl = Command::Ttl(b"k".to_vec());
+        assert!(ttl.is_ttl());
+        assert!(!ttl.is_write_op());
     }
 
     #[test]
@@ -801,6 +863,65 @@ mod tests {
             Command::ExpireAt(b"missing".to_vec(), get_unix_timestamp() + 60)
                 .apply_write(&mut key_store),
             Response::Integer(0)
+        );
+    }
+
+    #[test]
+    fn ttl_returns_stored_unix_timestamp_for_expiring_key() {
+        let mut key_store = KeyStore::default();
+        key_store.insert(b"key".to_vec(), StoredValue::new(b"value".to_vec()));
+        let expires_at = 2_000_000_000;
+
+        assert_eq!(
+            Command::ExpireAt(b"key".to_vec(), expires_at).apply_write(&mut key_store),
+            Response::Integer(1)
+        );
+        assert_eq!(
+            Command::Ttl(b"key".to_vec()).apply_read(&key_store),
+            Response::Integer(expires_at as i64)
+        );
+    }
+
+    #[test]
+    fn ttl_returns_minus_one_when_key_has_no_expiration() {
+        let mut key_store = KeyStore::default();
+        key_store.insert(b"key".to_vec(), StoredValue::new(b"value".to_vec()));
+
+        assert_eq!(
+            Command::Ttl(b"key".to_vec()).apply_read(&key_store),
+            Response::Integer(TTL_KEY_NO_EXPIRE_RESPONSE)
+        );
+    }
+
+    #[test]
+    fn ttl_returns_minus_two_for_missing_key() {
+        let key_store = KeyStore::default();
+
+        assert_eq!(
+            Command::Ttl(b"missing".to_vec()).apply_read(&key_store),
+            Response::Integer(TTL_KEY_MISSING_RESPONSE)
+        );
+    }
+
+    #[test]
+    fn ttl_treats_expired_keys_as_missing_without_ejecting() {
+        let mut key_store = KeyStore::default();
+        key_store.insert(
+            b"expired".to_vec(),
+            StoredValue {
+                bytes: b"old".to_vec(),
+                expires_at: Some(0),
+            },
+        );
+
+        assert_eq!(
+            Command::Ttl(b"expired".to_vec()).apply_read(&key_store),
+            Response::Integer(TTL_KEY_MISSING_RESPONSE)
+        );
+        assert!(
+            key_store
+                .get(&b"expired".to_vec())
+                .is_some_and(StoredValue::is_expired)
         );
     }
 
