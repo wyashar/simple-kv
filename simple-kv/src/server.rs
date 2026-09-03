@@ -166,7 +166,7 @@ async fn handle_client_connection(
     peer: SocketAddr,
     ss: Arc<RwLock<ServerState>>,
 ) {
-    let (incoming, mut outbound) = stream.into_split();
+    let (incoming, mut outgoing) = stream.into_split();
     let mut request_reader = RequestReader::new(incoming);
 
     loop {
@@ -178,7 +178,7 @@ async fn handle_client_connection(
             }
             Err(e) => {
                 warn!("Client {peer}: invalid RESP bytes: {e}");
-                send_response(&mut outbound, Response::Error(e.to_string())).await;
+                send_response(&mut outgoing, Response::Error(e.to_string())).await;
                 return;
             }
         };
@@ -193,18 +193,18 @@ async fn handle_client_connection(
                     let ss = ss.read().await;
                     ss.read(command)
                 };
-                send_response(&mut outbound, response).await;
+                send_response(&mut outgoing, response).await;
             }
             Err(e) => {
                 warn!("Invalid command from {peer}: {e}");
-                send_response(&mut outbound, Response::Error(e.to_string())).await;
+                send_response(&mut outgoing, Response::Error(e.to_string())).await;
             }
         }
     }
 }
 
-async fn send_response(outbound: &mut OwnedWriteHalf, response: Response<Bytes>) {
-    match outbound.write_all(&response.to_bytes()).await {
+async fn send_response(outgoing: &mut OwnedWriteHalf, response: Response<Bytes>) {
+    match outgoing.write_all(&response.to_bytes()).await {
         Ok(()) => info!("sent response: {response}"),
         Err(e) => warn!("failed to send response: {e}"),
     }

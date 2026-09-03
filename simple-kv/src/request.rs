@@ -260,6 +260,10 @@ impl fmt::Display for Request {
 }
 
 impl Request {
+    pub fn from_args(cstrs: Vec<Bytes>) -> Request {
+        Request { cstrs }
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf: Vec<u8> = Vec::new();
 
@@ -280,13 +284,6 @@ impl Request {
 
     pub fn into_args(self) -> Vec<Bytes> {
         self.cstrs
-    }
-}
-
-#[cfg(test)]
-impl Request {
-    pub fn from_args(cstrs: Vec<Bytes>) -> Request {
-        Request { cstrs }
     }
 }
 
